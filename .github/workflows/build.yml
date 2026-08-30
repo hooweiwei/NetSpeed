@@ -1,0 +1,25 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build & package NetSpeed.app
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build (swiftc + icns + ad-hoc signing)
+        run: ./build.sh
+
+      - name: Upload built app
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetSpeed.app
+          path: NetSpeed.app
+          if-no-files-found: error
