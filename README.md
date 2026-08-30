@@ -44,7 +44,13 @@ open NetSpeed.app
 4. ad-hoc 签名。
 
 构建产物 `NetSpeed.app` / `NetSpeed` / `AppIcon.icns` 不会被提交（见 `.gitignore`）。
+### 📀 打包 .dmg 安装包
 
+```bash
+./make_dmg.sh
+
+
+基于 `build.sh` 产出的 `NetSpeed.app` 自动打出一个 `NetSpeed.dmg`（UDZO 压缩），卷内自带指向 `/Applications` 的 **Applications** 链接——打开后把应用拖进去即完成安装。产物 `NetSpeed.dmg` 同样不提交（见 `.gitignore`）。
 ## 🚀 使用方法
 
 1. 运行后，状态栏出现网速读数（两个箭头分别表示上传/下载）。
