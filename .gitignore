@@ -1,11 +1,1 @@
-macOS
-.DS_Store
-
-Swift 构建产物（由 build.sh 生成，不入库）
-NetSpeed NetSpeed.app/ AppIcon.icns
-
-DMG 打包产物（由 make_dmg.sh 生成，不入库）
-NetSpeed.dmg .dmg_staging/
-
-通用
-*.o
+.DS_Store NetSpeed NetSpeed.app/ AppIcon.icns NetSpeed.dmg .dmg_staging/ *.o
