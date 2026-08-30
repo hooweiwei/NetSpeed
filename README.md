@@ -44,6 +44,8 @@ open NetSpeed.app
 4. ad-hoc 签名。
 
 构建产物 `NetSpeed.app` / `NetSpeed` / `AppIcon.icns` 不会被提交（见 `.gitignore`）。
+
+
 ### 📀 打包 .dmg 安装包
 
 ```bash
