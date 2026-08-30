@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    name: Build & package NetSpeed.app
+    name: Build app + package DMG
     runs-on: macos-latest
     steps:
       - name: Checkout
@@ -17,9 +17,14 @@ jobs:
       - name: Build (swiftc + icns + ad-hoc signing)
         run: chmod +x build.sh && ./build.sh
 
-      - name: Upload built app
+      - name: Package DMG (make_dmg.sh)
+        run: chmod +x make_dmg.sh && ./make_dmg.sh
+
+      - name: Upload built app & DMG
         uses: actions/upload-artifact@v4
         with:
-          name: NetSpeed.app
-          path: NetSpeed.app
+          name: NetSpeed-macos
+          path: |
+            NetSpeed.app
+            NetSpeed.dmg
           if-no-files-found: error
