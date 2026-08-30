@@ -15,7 +15,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build (swiftc + icns + ad-hoc signing)
-        run: ./build.sh
+        run: chmod +x build.sh && ./build.sh
 
       - name: Upload built app
         uses: actions/upload-artifact@v4
