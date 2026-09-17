@@ -1,12 +1,16 @@
 import AppKit
 import Darwin
 
-// MARK: - 网速采样：sysctl(NET_RT_IFLIST2) 读取物理网卡的 64 位累计收发字节数
+// MARK: - 网速采样：sysctl(NET_RT_IFLIST2) 读取物理网卡与 awdl0 的累计收发字节数
 //
 // 路由消息按 msglen 紧凑排列（非 8 字节对齐），Swift 里不能直接 load 结构体（未对齐 UB），
-// 必须按字节拷贝读取。偏移经 C 程序 offsetof 实测，并与 netstat -ib 数值比对一致：
-//   if_msghdr2 共 160B：msglen=u16@+0, type=u8@+3, ibytes=u64@+96, obytes=u64@+104
-//   sockaddr_dl 紧跟在 +160：nlen=u8@+165, 接口名字符在 +168 起 nlen 个字节
+// 必须按字节拷贝读取。偏移实测并与 netstat -ib 数值比对一致：
+//   if_msghdr2：msglen=u16@+0, type=u8@+3, ibytes=u64@+96, obytes=u64@+104
+//   sockaddr_dl：nlen=u8@+165, 接口名字符在 +168 起 nlen 个字节
+//   （macOS 15 实测 msglen=160；macOS 26 实测 msglen=180，多出的字段在尾部，上述偏移未变）
+// 注意：macOS 26 内核把 ibytes/obytes 当 32 位计数器写入（高 32 位恒为 0），
+// 累计值在 4.29GB(2³²) 处回绕——所以速度必须用 wrapDelta32() 做回绕减法，
+// 且绝对值只用于展示/调试，不可直接当真实累计量。
 
 func currentBytes() -> (rx: Int64, tx: Int64) {
     var rx: Int64 = 0
@@ -42,8 +46,11 @@ func currentBytes() -> (rx: Int64, tx: Int64) {
             let name = nlen > 0 && nlen < 32
                 ? String(decoding: Data(bytes: buffer.advanced(by: offset + 168), count: nlen), as: UTF8.self)
                 : ""
-            // 只统计物理网卡 en*：排除 lo0/utun/awdl 等，避免 VPN(ClashX TUN) 双重计数
-            if name.hasPrefix("en"), name.dropFirst(2).allSatisfy(\.isNumber) {
+            // 统计 en* 物理网卡 + awdl0（AirDrop/接力/随航的专用直连链路）。
+            // utun* 仍排除：VPN(ClashX TUN) 流量已在底层物理网卡计过，避免双重计数。
+            // llw0(Wi-Fi Aware)/bridge0(互联网共享)/anpi*(内部聚合) 无独立流量或会重复计数，一并排除。
+            let isPhysicalEN = name.hasPrefix("en") && name.dropFirst(2).allSatisfy(\.isNumber)
+            if isPhysicalEN || name == "awdl0" {
                 rx += Int64(bitPattern: readLE(buffer, offset + 96, UInt64.self))
                 tx += Int64(bitPattern: readLE(buffer, offset + 104, UInt64.self))
             }
@@ -51,6 +58,14 @@ func currentBytes() -> (rx: Int64, tx: Int64) {
         offset += msglen
     }
     return (rx, tx)
+}
+
+/// 计数器差分：只取低 32 位做回绕减法（&-）。
+/// 内核计数器在 2³² 处回绕且高 32 位恒为 0，只要单次采样间隔流量 < 4.29GB
+/// （即网速 < ~17Gbit/s），差分结果就与真实增量完全一致；老系统真 64 位计数器同样适用。
+func wrapDelta32(_ now: Int64, _ prev: Int64) -> Int64 {
+    let mask = UInt32(0xFFFF_FFFF)
+    return Int64((UInt32(truncatingIfNeeded: now) & mask) &- (UInt32(truncatingIfNeeded: prev) & mask))
 }
 
 // MARK: - 速度格式化：KB/s 与 ≥10MB/s 整数；1MB~9.9MB 保留 1 位小数
@@ -196,8 +211,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var isSamplingProcs = false
     private var lastProcSampleAt = Date()
 
+    private var isMenuOpen = false          // 菜单是否处于打开状态（打开期间才需要实时重填）
+    private var lastMenuSignature = ""      // 上次渲染的 Top10 内容签名：数据没变就不重填，避免闪烁
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // 防止 App Nap 拖慢 2 秒定时器（不会阻止系统睡眠）
+        // 防止 App Nap 拖慢 2 秒定时器；用 AllowingIdleSystemSleep 变体，
+        // 不申请 idleSystemSleepDisabled 位，避免让整机无法空闲睡眠
         activityTokenLogic()
 
         guard let button = statusItem.button else { return }
@@ -206,6 +225,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // 通过 NSImage.alignmentRectInsets 声明「对齐矩形=整个图」，消除按钮额外边距，
         // 让图标两侧贴近（配合 horizontalPad=0 后剩余空间来自此边距）。
         render(up: "0KB/s", down: "0KB/s")
+        setupMenu()   // 菜单只创建一次；打开期间由数据更新直接重填，与状态栏同步刷新
 
         lastSample = currentBytes()
         refresh()   // 立即跑第一轮：状态栏 + 进程快照基线
@@ -220,22 +240,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var activityToken: NSObjectProtocol?
 
     private func activityTokenLogic() {
+        // 注意：.userInitiated 自带 idleSystemSleepDisabled 位（0x100000，
+        // 实测 userInitiated=0xffffff vs AllowingIdleSystemSleep=0xefffff），
+        // 那是「用户发起的重活别让系统睡」的语义，会把整机钉住不休眠。
+        // 菜单栏 2 秒定时器只需要防 App Nap，因此改用后者。
         activityToken = ProcessInfo.processInfo.beginActivity(
-            options: .userInitiated, reason: "NetSpeed 定时刷新网速")
+            options: .userInitiatedAllowingIdleSystemSleep, reason: "NetSpeed 定时刷新网速")
+    }
+
+    /// 退出时显式释放活动令牌，与 beginActivity 成对。
+    /// 进程结束系统本也会回收，但显式 endActivity 更清晰，
+    /// 也避免个别情况下（如 NSApp.terminate）令牌句柄悬空。
+    func applicationWillTerminate(_ notification: Notification) {
+        guard let token = activityToken else { return }
+        ProcessInfo.processInfo.endActivity(token)
+        activityToken = nil
     }
 
     // MARK: 菜单
 
-    private func rebuildMenu() {
+    /// 菜单只创建一次并常驻 statusItem。旧实现每次数据更新都新建 NSMenu 赋给 statusItem，
+    /// 但屏幕上「已打开的那个菜单」仍是旧对象，新赋值对它无效，
+    /// 且 menuNeedsUpdate 只在打开瞬间触发一次 → 菜单开着时 Top10 永远不刷新。
+    /// 现改为：打开期间直接重填同一个菜单实例，与状态栏同步 2 秒刷新。
+    private func setupMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
-        menu.delegate = self   // 每次打开瞬间重填最新排名
+        menu.delegate = self
         fillRows(into: menu)
         statusItem.menu = menu
     }
 
-    /// 菜单 delegate：打开瞬间用缓存数据重排（顶部更新随 2 秒定时自动发生）
+    /// 菜单 delegate：打开瞬间强制重填一次，保证展示的就是最新排名
     func menuNeedsUpdate(_ menu: NSMenu) {
+        lastMenuSignature = currentMenuSignature()
+        menu.removeAllItems()
+        fillRows(into: menu)
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        isMenuOpen = true
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        isMenuOpen = false
+    }
+
+    private func currentMenuSignature() -> String {
+        topProcesses
+            .map { "\($0.name)|\(formatSpeed($0.down))|\(formatSpeed($0.up))" }
+            .joined(separator: "\n")
+    }
+
+    /// 菜单打开中 → 直接重填当前打开的菜单，Top10 与状态栏同步实时刷新。
+    /// 内容签名没变化时跳过，避免空闲时每 2 秒无意义重绘（高亮/闪烁）。
+    private func refillOpenMenu() {
+        guard isMenuOpen, let menu = statusItem.menu else { return }
+        let signature = currentMenuSignature()
+        guard signature != lastMenuSignature else { return }
+        lastMenuSignature = signature
         menu.removeAllItems()
         fillRows(into: menu)
     }
@@ -364,8 +427,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // 状态栏总网速
         let sample = currentBytes()
         if let prev = lastSample {
-            let upSpeed = Double(max(0, sample.tx - prev.tx)) / refreshInterval
-            let downSpeed = Double(max(0, sample.rx - prev.rx)) / refreshInterval
+            let upSpeed = Double(wrapDelta32(sample.tx, prev.tx)) / refreshInterval
+            let downSpeed = Double(wrapDelta32(sample.rx, prev.rx)) / refreshInterval
             render(up: formatSpeed(upSpeed), down: formatSpeed(downSpeed))
         }
         lastSample = sample
@@ -429,6 +492,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var speeds: [ProcSpeed] = []
         for row in rows {
             let prev = procLast[row.key]
+            // 注意：nettop 的进程累计值是真 64 位（会超 2³²）但【不单调】——
+            // 连接关闭时其字节会从统计中消失（实测 sharingd 传输中会回退数百 MB）。
+            // 所以这里必须钳位为 0，不能用 wrapDelta32（会把回退误算成巨大正尖峰）。
             let dIn = max(0, row.inBytes - (prev?.inBytes ?? row.inBytes))
             let dOut = max(0, row.outBytes - (prev?.outBytes ?? row.outBytes))
             procLast[row.key] = (row.inBytes, row.outBytes)
@@ -449,7 +515,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         procLast = procLast.filter { alive.contains($0.key) }
 
         topProcesses = Array(speeds.sorted { $0.total > $1.total }.prefix(10))
-        rebuildMenu()   // 数据更新；菜单打开中时下次打开即见新排名
+        refillOpenMenu()   // 菜单打开中：直接重填当前菜单 → 与状态栏同步实时刷新
     }
 
     /// "python3.11.1727" → "python3.11"（去最后的 .pid）；同进程多连接 nettop 已按 pid 聚合
@@ -460,6 +526,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         return String(key[..<lastDot]).trimmingCharacters(in: .whitespaces)
     }
+}
+
+// 调试模式：--debug-bytes 打印一次累计收发字节数后退出。
+// 用于校验接口统计口径：与 netstat -ib 中 en* + awdl0（按接口去重）的合计对账。
+if CommandLine.arguments.contains("--debug-bytes") {
+    let b = currentBytes()
+    print("rx=\(b.rx) tx=\(b.tx)")
+    exit(0)
 }
 
 let app = NSApplication.shared

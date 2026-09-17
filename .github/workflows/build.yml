@@ -8,18 +8,18 @@ on:
 
 jobs:
   build:
-    name: Build & package NetSpeed.app
+    name: Build arm64 + x86_64, package zip & DMG
     runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build (swiftc + icns + ad-hoc signing)
-        run: ./build.sh
+      - name: Build & package release artifacts
+        run: chmod +x package_release.sh && ./package_release.sh
 
-      - name: Upload built app
+      - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: NetSpeed.app
-          path: NetSpeed.app
+          name: NetSpeed-release
+          path: dist/release/
           if-no-files-found: error
