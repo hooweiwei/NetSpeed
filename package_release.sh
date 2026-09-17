@@ -12,6 +12,8 @@ cd "$(dirname "$0")"
 
 RELEASE="dist/release"
 mkdir -p "$RELEASE"
+# 清掉上一次留在此处的产物，保证 dist/release 只含当前版本的发布物
+rm -f "$RELEASE"/NetSpeed-*.zip "$RELEASE"/NetSpeed-*.dmg "$RELEASE"/SHA256SUMS.txt
 # 版本号与 build.sh 同一来源：直接读构建产物，绝不另算一套
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
     dist/arm64/NetSpeed.app/Contents/Info.plist 2>/dev/null || echo 0.0)"
