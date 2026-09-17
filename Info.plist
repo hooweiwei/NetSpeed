@@ -17,9 +17,12 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>1.1</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
+	<!-- 以下三项由 build.sh 按 git tag / 提交数自动覆写，此处仅为本仓库无 tag 时的兜底值 -->
+	<key>NetSpeedGitDescribe</key>
+	<string>unknown</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>12.0</string>
 	<key>LSUIElement</key>

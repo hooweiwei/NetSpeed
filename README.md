@@ -49,7 +49,30 @@
 `build.sh` 会：
 1. 用 `swiftc -O -target <arch>-apple-macos12.0` 编译 `main.swift`；
 2. 组装 `NetSpeed.app` 包，拷入 `Info.plist` 与仓库根目录的 `AppIcon.icns`；
-3. ad-hoc 签名。
+3. 写入版本号（见下节）；
+4. ad-hoc 签名。
+
+## 🔖 版本号
+
+版本号由 `build.sh` 在组装 `.app` 时自动写入，**不要在 `Info.plist` 里手动维护**（那里只是无 tag 时的兜底值）：
+
+| 字段 | 来源 | 示例 |
+|---|---|---|
+| `CFBundleShortVersionString` | 最近的 git tag（去掉 `v`）| `v1.1` → `1.1` |
+| `CFBundleVersion` | `git rev-list --count HEAD`（提交数，单调递增）| `7` |
+| `NetSpeedGitDescribe` | `git describe --tags --always --dirty`（追溯用）| `v1.1-3-g3cbad4d-dirty` |
+
+发版流程：改代码 → 提交 → `git tag v1.2` → `./package_release.sh`，产物即自报 `1.2`；
+未打 tag 的构建会沿用 `Info.plist` 现值，构建号仍随提交数递增，因此同版本的不同构建也能区分。
+
+查看已安装版本的版本号：
+
+```bash
+defaults read /Applications/NetSpeed.app/Contents/Info.plist CFBundleShortVersionString
+defaults read /Applications/NetSpeed.app/Contents/Info.plist NetSpeedGitDescribe
+```
+
+> CI 中 `actions/checkout` 已设 `fetch-depth: 0`，否则拿不到 tag 与提交数。
 
 ## 🚀 发布（GitHub 发布物）
 
@@ -61,12 +84,14 @@
 
 ```
 dist/release/
-├── NetSpeed-arm64.zip      # Apple Silicon 直装包（解压即用，分发首选）
-├── NetSpeed-x86_64.zip     # Intel 直装包
-├── NetSpeed-arm64.dmg      # 安装镜像（拖拽安装）
-├── NetSpeed-x86_64.dmg
-└── SHA256SUMS.txt          # 校验和
+├── NetSpeed-<版本>-arm64.zip   # Apple Silicon 直装包（解压即用，分发首选）
+├── NetSpeed-<版本>-x86_64.zip  # Intel 直装包
+├── NetSpeed-<版本>-arm64.dmg   # 安装镜像（拖拽安装）
+├── NetSpeed-<版本>-x86_64.dmg
+└── SHA256SUMS.txt              # 校验和
 ```
+
+以当前版本为例即 `NetSpeed-1.1-arm64.dmg`。
 
 单独打 dmg：`./make_dmg.sh [arch]`（依赖 `dist/<arch>/NetSpeed.app` 已存在），dmg 卷内自带指向 `/Applications` 的链接，拖进去即完成安装。
 
@@ -113,8 +138,8 @@ NetSpeed/
 ├── main.swift            # 全部源码（采样/格式化/状态栏渲染/菜单/定时刷新）
 ├── build.sh              # 构建脚本（支持 arm64/x86_64/universal 参数）
 ├── make_dmg.sh           # 打包 .dmg 安装镜像（hdiutil）
-├── package_release.sh    # 一键产出 GitHub 发布物（zip + dmg + SHA256）
-├── Info.plist            # 应用元数据（LSUIElement 状态栏应用）
+├── package_release.sh    # 一键产出 GitHub 发布物（zip + dmg + SHA256，文件名带版本）
+├── Info.plist            # 应用元数据（LSUIElement 状态栏应用；版本号由 build.sh 覆写）
 ├── AppIcon.icns          # 应用图标（与 Assets/AppIcon.iconset 同源）
 ├── Assets/
 │   └── AppIcon.iconset/  # 图标源多尺寸 PNG
@@ -128,6 +153,7 @@ NetSpeed/
 
 ## 📜 更新日志
 
+- **1.1（2026-09-17）**：修复 `beginActivity` 选项误用 `.userInitiated` 导致整机永不空闲睡眠的问题（改为 `.userInitiatedAllowingIdleSystemSleep`，并在退出时成对调用 `endActivity`）；版本号改由 `build.sh` 从 git tag 自动写入，发布物文件名带版本号。
 - **2026-09-16**：总网速计入 `awdl0`（修复 AirDrop/接力流量不显示）；修复计数器 4.29GB 回绕导致的速度显示假 0（接口与进程两处差分均改为回绕减法）；新增 `--debug-bytes` 调试开关；构建脚本支持架构参数，产物统一到 `dist/`；换用新图标；新增 x86_64/universal 构建。
 
 ## 📄 License
