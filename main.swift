@@ -343,18 +343,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             + padTo(up, targetWidth: upW, alignRight: true)
         }
 
-        // 进程行：自定义 RowView 手动绘制，灰色文字、无悬停高亮（这些行无点击反馈）、垂直居中。
+        // 进程行：自定义 RowView 手动绘制，labelColor 文字（浅色近黑、深色纯白，随系统外观自适应）、无悬停高亮（这些行无点击反馈）、垂直居中。
         func processItem(_ string: String) -> NSMenuItem {
             let contentW = measuredWidth(string)
             let padW = measuredWidth("   ")
             let totalW = padW + contentW + padW
             let h: CGFloat = 20   // 11pt 行高约14pt，行高20居中
-            let view = RowView(text: string, font: menuFont, color: .secondaryLabelColor,
+            let view = RowView(text: string, font: menuFont, color: .labelColor,
                                contentW: contentW, leftInset: padW)
             view.frame = NSRect(x: 0, y: 0, width: totalW, height: h)
             let it = NSMenuItem()
             it.view = view
-            it.isEnabled = false   // 无高亮、无点击；view 自定义灰色
+            it.isEnabled = false   // 无高亮、无点击；view 负责文字颜色（labelColor）
             return it
         }
 
