@@ -112,6 +112,31 @@ private func padTo(_ s: String, targetWidth: CGFloat, alignRight: Bool) -> Strin
     return alignRight ? pad + s : s + pad
 }
 
+// 菜单宽度固定化（右缘不跳动的关键）：
+// 旧实现每 2 秒按「当前 Top10 实测最宽值」定列宽，进程名/速度位数一变菜单就变宽变窄。
+// 现在：速度列按最坏情况恒定预留；进程名列在【菜单打开瞬间】算一次并钉住，
+// 打开期间所有重填沿用钉住值 → 开着的时候宽度纹丝不动，下次打开再按新数据自适应。
+/// 进程名列宽上限（防极端长名撑爆菜单）：20 个 CJK 字符宽（"中"是等宽字体里最宽的一类字符），超出截断加 "…"
+let menuNameMaxW = measuredWidth(String(repeating: "中", count: 20))
+/// 速度列固定宽："999MB/s↓"——formatSpeed 各分支的最宽输出（"999KB/s"/"9.9MB/s"/"999MB/s" 同 7 字符，
+/// GB/s 受 32 位计数器回绕上限约束最宽约 "2GB/s"，反而窄），再留 1 空格余量
+let menuSpeedFieldW = measuredWidth("999MB/s↓") + measuredWidth(" ")
+/// 列间空隙 / 行左右边距：全局唯一来源，行内容、横线、底部项对齐都引用这里
+let menuGapStr = "      "
+let menuGapW = measuredWidth(menuGapStr)
+let menuSidePadW = measuredWidth("   ")
+
+/// 超宽字符串按字符逐个实测截断，补 "…"，保证结果宽度不超过 targetWidth
+private func truncateToWidth(_ s: String, targetWidth: CGFloat) -> String {
+    if measuredWidth(s) <= targetWidth { return s }
+    var result = ""
+    for ch in s {
+        if measuredWidth(result + String(ch) + "…") > targetWidth { break }
+        result.append(ch)
+    }
+    return result + "…"
+}
+
 // MARK: - 状态栏渲染：把两行文字画成 NSImage 交给状态栏按钮
 //
 // 按钮对「图片内容」使用系统原生的毛玻璃高亮与标准左右留白（和 WiFi/电池一致）。
@@ -213,6 +238,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var isMenuOpen = false          // 菜单是否处于打开状态（打开期间才需要实时重填）
     private var lastMenuSignature = ""      // 上次渲染的 Top10 内容签名：数据没变就不重填，避免闪烁
+    // 进程名列宽：菜单【打开瞬间】按当时最宽进程名测一次并钉住，打开期间所有重填沿用它，
+    // 之后 Top10 数据再怎么变，菜单宽度都恒定（速度列本就按最坏情况恒定预留）。
+    private var pinnedNameW: CGFloat = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 防止 App Nap 拖慢 2 秒定时器；用 AllowingIdleSystemSleep 变体，
@@ -267,15 +295,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.autoenablesItems = false
         menu.delegate = self
-        fillRows(into: menu)
+        fillRows(into: menu, nameW: pinnedNameW)
         statusItem.menu = menu
     }
 
-    /// 菜单 delegate：打开瞬间强制重填一次，保证展示的就是最新排名
+    /// 菜单 delegate：打开瞬间强制重填一次，保证展示的就是最新排名。
+    /// 同时在这里重新测定并「钉住」进程名列宽——打开之后的定时重填全部沿用该值，
+    /// 菜单宽度在整段打开期间保持恒定。
     func menuNeedsUpdate(_ menu: NSMenu) {
         lastMenuSignature = currentMenuSignature()
+        var nameW: CGFloat = 0
+        for p in topProcesses { nameW = max(nameW, measuredWidth(p.name)) }
+        pinnedNameW = min(nameW, menuNameMaxW)
         menu.removeAllItems()
-        fillRows(into: menu)
+        fillRows(into: menu, nameW: pinnedNameW)
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -300,7 +333,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard signature != lastMenuSignature else { return }
         lastMenuSignature = signature
         menu.removeAllItems()
-        fillRows(into: menu)
+        fillRows(into: menu, nameW: pinnedNameW)   // 沿用打开瞬间钉住的列宽，宽度不变
     }
 
     /// 自定义横线菜单项：宽度=内容区（左端 padW → 右端 padW+width），
@@ -319,34 +352,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return it
     }
 
-    private func fillRows(into menu: NSMenu) {
+    /// - Parameter nameW: 进程名列宽。由 menuNeedsUpdate 在打开瞬间钉住（menuNeedsUpdate 里
+    ///   min(最宽进程名, menuNameMaxW)），打开期间的定时重填沿用它 → 列宽恒定。
+    ///   速度两列恒用 menuSpeedFieldW（最坏情况预留），列间距/边距恒用全局常量。
+    private func fillRows(into menu: NSMenu, nameW: CGFloat) {
         // 整行等宽 JetBrains Mono：进程区列右对齐精确。无表头——用速度值后缀箭头区分：
-        // 下载列数值后加 ↓，上传列数值后加 ↑（如 1KB/s↓ / 0KB/s↑，方向与状态栏一致）。
-        let gapW = measuredWidth("      ")
-        let gap = "      "
+        // 下载列数值后加 ↓，上传列数值后加 ↑（如 1KB/s↓ / 0B/s↑，方向与状态栏一致）。
+        let gap = menuGapStr
         let downArrow = "↓", upArrow = "↑"
 
-        var nameW: CGFloat = 0
-        for p in topProcesses { nameW = max(nameW, measuredWidth(p.name)) }
-        var downW: CGFloat = 0
-        var upW: CGFloat = 0
-        for p in topProcesses {
-            downW = max(downW, measuredWidth(formatSpeed(p.down) + downArrow))
-            upW = max(upW, measuredWidth(formatSpeed(p.up) + upArrow))
-        }
-        let nameFieldW = nameW + gapW
-
         func rowString(_ name: String, _ down: String, _ up: String) -> String {
-            padTo(name, targetWidth: nameFieldW, alignRight: false)
-            + padTo(down, targetWidth: downW, alignRight: true)
+            padTo(truncateToWidth(name, targetWidth: nameW), targetWidth: nameW, alignRight: false)
             + gap
-            + padTo(up, targetWidth: upW, alignRight: true)
+            + padTo(down, targetWidth: menuSpeedFieldW, alignRight: true)
+            + gap
+            + padTo(up, targetWidth: menuSpeedFieldW, alignRight: true)
         }
+
+        // 行内容总宽 = 五个字段之和（全部恒定/已钉住），不按实测文字宽——
+        // 补齐取整的亚像素误差也不会让菜单宽度逐帧抖动，右缘因此固定。
+        let contentW = nameW + menuGapW + menuSpeedFieldW + menuGapW + menuSpeedFieldW
 
         // 进程行：自定义 RowView 手动绘制，labelColor 文字（浅色近黑、深色纯白，随系统外观自适应）、无悬停高亮（这些行无点击反馈）、垂直居中。
         func processItem(_ string: String) -> NSMenuItem {
-            let contentW = measuredWidth(string)
-            let padW = measuredWidth("   ")
+            let padW = menuSidePadW
             let totalW = padW + contentW + padW
             let h: CGFloat = 20   // 11pt 行高约14pt，行高20居中
             let view = RowView(text: string, font: menuFont, color: .labelColor,
@@ -364,11 +393,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(processItem(rowString(p.name, down, up)))
         }
 
-        // 自定义横线：宽度=数据区总宽，左端=第一列左缘、右端=第三列(KB/s↑)右缘，
-        // 与进程行、底部项对齐。
-        let padW = measuredWidth("   ")
-        let lineContentW = nameFieldW + downW + gapW + upW
-        menu.addItem(separatorView(width: lineContentW, padW: padW))
+        // 自定义横线：宽度=数据区总宽（与进程行同一表达式，必然相等），
+        // 左端=第一列左缘、右端=第三列(↑)右缘，与进程行、底部项对齐。
+        menu.addItem(separatorView(width: contentW, padW: menuSidePadW))
 
         // 底部功能项：系统 NSMenuItem(title:action:) —— 自带系统原生高亮蓝条 + 原生点击。
         // 图标：SF Symbols（活动监控用波形 ECG、退出用电源），以 NSTextAttachment 嵌入标题，使
