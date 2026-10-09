@@ -63,7 +63,8 @@
 | `CFBundleVersion` | `git rev-list --count HEAD`（提交数，单调递增）| `7` |
 | `NetSpeedGitDescribe` | `git describe --tags --always --dirty`（追溯用）| `v1.1-3-g3cbad4d-dirty` |
 
-发版流程：改代码 → 提交 → `git tag v1.2` → `./package_release.sh`，产物即自报 `1.2`；
+发版流程：改代码 → 提交 → `git tag vX.Y.Z` → `git push origin main vX.Y.Z`。
+推送 tag 会触发 CI 自动编译两架构并直接发布 GitHub Release（见下）；本地需要离线包时再跑 `./package_release.sh`。
 未打 tag 的构建会沿用 `Info.plist` 现值，构建号仍随提交数递增，因此同版本的不同构建也能区分。
 
 查看已安装版本的版本号：
@@ -76,6 +77,16 @@ defaults read /Applications/NetSpeed.app/Contents/Info.plist NetSpeedGitDescribe
 > CI 中 `actions/checkout` 已设 `fetch-depth: 0`，否则拿不到 tag 与提交数。
 
 ## 🚀 发布（GitHub 发布物）
+
+### 自动发布（推荐）
+
+`git push origin main vX.Y.Z` 推上 tag（形如 `v1.3.1`）后，CI 自动编译 → 打包 → 建 Release → 上传 assets，
+Release 正文取 README「更新日志」中该版本的条目。授权用 workflow 内置的 `GITHUB_TOKEN`
+（`permissions: contents: write`），**无需配置任何 secret**。非 tag 触发（main push / PR / 手动）只上传 CI 工件，不发 Release。
+
+> 若浏览器手动上传 assets 总是失败（大文件走 S3 易超时），改用这条路径即可绕开。
+
+### 本地打包
 
 ```bash
 ./package_release.sh    # 编译两架构 + zip + dmg + SHA256SUMS 一条龙
@@ -148,7 +159,7 @@ NetSpeed/
 │   ├── arm64|x86_64|universal/NetSpeed.app
 │   └── release/          # GitHub 发布物（zip/dmg/SHA256SUMS.txt）
 ├── docs/screenshots/     # README 截图
-├── .github/workflows/    # 构建 CI（package_release.sh 工件上传）
+├── .github/workflows/    # 构建 CI：push/PR 上传工件；推 `v*` tag 时自动发布 GitHub Release
 └── .gitignore
 ```
 

@@ -3,8 +3,12 @@ name: Build
 on:
   push:
     branches: [main]
+    tags: ['v*']          # 打 tag 推送即自动发布 GitHub Release
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: write         # 内置 GITHUB_TOKEN 授权建 Release/上传 assets，无需任何 secret
 
 jobs:
   build:
@@ -19,9 +23,43 @@ jobs:
       - name: Build & package release artifacts
         run: chmod +x package_release.sh make_dmg.sh && ./package_release.sh
 
-      - name: Upload release artifacts
+      # 发布物文件名带版本，直接来自构建产物，绝不另算一套
+      - name: Resolve version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+                 dist/arm64/NetSpeed.app/Contents/Info.plist)"
+          echo "APP_VERSION=$VER" >> "$GITHUB_ENV"
+
+      # Release 正文取 README「更新日志」里对应版本的条目；取不到则只放校验说明
+      - name: Compose release body
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          {
+            echo "NetSpeed $APP_VERSION"
+            echo ""
+            awk -v v="$APP_VERSION" '
+              $0 ~ "^- \\*\\*"v"（" { sub(/^- \*\*[^*]*\*\*：/, "", $0); print; exit }
+            ' README.md
+            echo ""
+            echo "**校验**：\`shasum -a 256 -c SHA256SUMS.txt\`"
+          } > release-body.md
+          echo "---- Release body ----"; cat release-body.md
+
+      - name: Upload CI artifacts
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         uses: actions/upload-artifact@v4
         with:
           name: NetSpeed-release
           path: dist/release/
           if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          body_path: release-body.md
+          files: dist/release/*
+          fail_on_unmatched_files: true
+          make_latest: 'true'
