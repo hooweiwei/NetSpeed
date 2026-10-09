@@ -170,18 +170,19 @@ enum StatusRenderer {
         let valueRightX = arrowRightX - textGap                // 文字右缘固定
 
         return NSImage(size: NSSize(width: width, height: height), flipped: true) { _ in
-            drawRow(value: up, arrow: "↑", color: .systemRed,
+            drawRow(value: up, arrow: "↑",
                     y: y0, valueRightX: valueRightX, arrowRightX: arrowRightX)
-            drawRow(value: down, arrow: "↓", color: .systemBlue,
+            drawRow(value: down, arrow: "↓",
                     y: y0 + lineHeight, valueRightX: valueRightX, arrowRightX: arrowRightX)
             return true
         }
     }
 
-    private static func drawRow(value: String, arrow: String, color: NSColor,
+    // 箭头与数值同色（labelColor：深色菜单栏为白、浅色菜单栏为黑，随系统外观自适应）
+    private static func drawRow(value: String, arrow: String,
                                 y: CGFloat, valueRightX: CGFloat, arrowRightX: CGFloat) {
         let valueAttr = attributedText(value, color: .labelColor)
-        let arrowAttr = attributedText(arrow, color: color)
+        let arrowAttr = attributedText(arrow, color: .labelColor)
         // 文字右对齐：从右缘向左画（三位数时向左扩展），箭头贴右缘固定
         valueAttr.draw(at: NSPoint(x: valueRightX - valueAttr.size().width, y: y))
         arrowAttr.draw(at: NSPoint(x: arrowRightX, y: y))
