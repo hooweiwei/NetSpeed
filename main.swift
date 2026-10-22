@@ -260,12 +260,82 @@ func batteryChargingWatts() -> Double? {
 //
 // 字体用系统自带的 SF Mono（monospacedSystemFont），无需随包分发字体文件。
 
-// 菜单字体：表格/数值用 SF Mono 11pt；底部功能项用系统菜单标准字体 13pt。
+// 菜单字体：表格/数值用 SF Mono 11pt；功耗行标签与标题行用系统字体。
 let menuFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
 let menuFooterFont = NSFont.menuFont(ofSize: 13)
 
 private func measuredWidth(_ s: String) -> CGFloat {
     NSAttributedString(string: s, attributes: [.font: menuFont]).size().width
+}
+
+// MARK: 菜单宽度与标题行
+
+/// 标题行左右内边距：与系统给菜单项标题列的内边距对齐，让「NetSpeed」与进程名同一条竖线。
+let menuHeaderInset: CGFloat = 16
+/// 标题行高度 / 关闭按钮直径。
+let menuHeaderHeight: CGFloat = 34
+let menuCloseButtonSize: CGFloat = 22
+
+/// 活动监视器路径（系统固定位置）。
+let activityMonitorPath = "/System/Applications/Utilities/Activity Monitor.app"
+
+/// 菜单内容区宽度（标题列起点 → 最后一个右对齐制表位）。
+func menuContentWidth(nameW: CGFloat) -> CGFloat {
+    let stops = menuTabStops(nameW: nameW)
+    return stops.last?.location ?? 0
+}
+
+/// 标题行视图：左侧标题文字，右侧关闭按钮。点击关闭按钮退出应用。
+/// 这是菜单里唯一的自定义视图——原生菜单项无法把控件贴到最右缘。
+final class MenuHeaderView: NSView {
+    private let titleLabel = NSTextField(labelWithString: "NetSpeed")
+    private let closeButton = NSButton()
+    private let onClose: () -> Void
+
+    init(contentWidth: CGFloat, onClose: @escaping () -> Void) {
+        self.onClose = onClose
+        super.init(frame: NSRect(x: 0, y: 0, width: contentWidth + menuHeaderInset * 2,
+                                 height: menuHeaderHeight))
+        autoresizingMask = [.width]
+
+        // 标题：比正文大一号（13 → 15pt），加粗一档（regular → semibold）
+        titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        titleLabel.textColor = .labelColor
+        titleLabel.lineBreakMode = .byTruncatingTail
+        addSubview(titleLabel)
+
+        // 关闭按钮：纯 xmark（悬停由 NSButton 自己给淡底），无边框、无文字
+        closeButton.isBordered = false
+        closeButton.bezelStyle = .inline
+        closeButton.imagePosition = .imageOnly
+        closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "退出 NetSpeed")?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold))
+        closeButton.contentTintColor = .secondaryLabelColor
+        closeButton.target = self
+        closeButton.action = #selector(closeTapped)
+        closeButton.toolTip = "退出 NetSpeed"
+        addSubview(closeButton)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) 未实现") }
+
+    override func layout() {
+        super.layout()
+        let titleH: CGFloat = 20
+        titleLabel.frame = NSRect(x: menuHeaderInset,
+                                  y: (bounds.height - titleH) / 2,
+                                  width: max(0, bounds.width - menuHeaderInset * 2 - menuCloseButtonSize - 8),
+                                  height: titleH)
+        closeButton.frame = NSRect(x: bounds.width - menuHeaderInset - menuCloseButtonSize,
+                                   y: (bounds.height - menuCloseButtonSize) / 2,
+                                   width: menuCloseButtonSize, height: menuCloseButtonSize)
+    }
+
+    @objc private func closeTapped() {
+        // 菜单处于 tracking 模式，直接 terminate 可能被吞；先结束菜单跟踪再退出。
+        enclosingMenuItem?.menu?.cancelTracking()
+        onClose()
+    }
 }
 
 // 列宽：速度列按最坏情况恒定预留（"999MB/s↓" 是 formatSpeed 最宽输出），
@@ -442,18 +512,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return "battery.100"
     }()
     // 底部功能项图标：与功耗行同为面性填充风格；旧系统回退到填充柱状图/原线框符号。
-    private let activityMonitorIconName: String = {
-        for name in ["waveform.path.ecg.rectangle.fill", "chart.bar.fill", "waveform.path.ecg"] {
-            if NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil { return name }
-        }
-        return "waveform.path.ecg"
-    }()
-    private let quitIconName: String = {
-        for name in ["power.circle.fill", "power"] {
-            if NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil { return name }
-        }
-        return "power"
-    }()
 
     // 进程流量：nettop 的 bytes 是进程启动以来的累计值，本地存上一次快照做差求速度
     private var procLast: [String: (inBytes: Int64, outBytes: Int64)] = [:]
@@ -571,6 +629,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // 三列由制表位定位：进程名左对齐，两个速度列右对齐。
         let downArrow = "↓", upArrow = "↑"
 
+        /// 标题行（NetSpeed + 关闭按钮）。宽度 = 内容区 + 两侧内边距，
+        /// 与菜单宽度一致，按钮因此贴在最右缘。
+        func headerItem(width: CGFloat) -> NSMenuItem {
+            let view = MenuHeaderView(contentWidth: width) { NSApp.terminate(nil) }
+            let it = NSMenuItem()
+            it.view = view
+            it.isEnabled = false
+            return it
+        }
+
         /// 把三列内容拼成「原生 attributedTitle」：一个制表位分隔的字符串。
         /// 所有行共用同一套制表位，列对齐由排版引擎保证，与文字实际宽度无关。
         func rowTitle(_ name: String, _ down: String, _ up: String) -> NSAttributedString {
@@ -583,13 +651,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         // 进程行：原生菜单项 + 透明占位图标（标题列左缘由系统统一决定）。
-        // 用 action=nil 而非 isEnabled=false 让行不可点：系统会把禁用项标题画成灰色，
-        // 而 nil action 的项仍按启用态渲染（正常 labelColor），只是点了没反应。
+        // 点击任意进程行 → 打开活动监视器的「网络」页。
         func processItem(_ name: String, _ down: String, _ up: String) -> NSMenuItem {
             let it = NSMenuItem()
             it.attributedTitle = rowTitle(name, down, up)
             it.image = menuInvisibleIcon
-            it.action = nil
+            it.action = #selector(openActivityMonitorNetwork)
+            it.target = self
             it.isEnabled = true
             return it
         }
@@ -610,18 +678,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             attr.addAttribute(.font, value: menuFont, range: valueRange)
             it.attributedTitle = attr
             it.image = menuSymbolImage(iconName, accessibilityDescription: label)
-            it.action = nil
+            it.action = #selector(openActivityMonitorEnergy)   // 点击任意功耗行 → 活动监视器「能耗」页
+            it.target = self
             it.isEnabled = true
             return it
         }
 
-        // 顶部横线：菜单开头的分隔线会被系统裁掉，因此先用一个 0 高度视图项占位，
-        // 再放原生分隔线——这样卡片顶部才有一条与下方同款的横线。
-        let topSpacer = NSMenuItem()
-        topSpacer.view = NSView(frame: NSRect(x: 0, y: 0, width: 10, height: 2))
-        topSpacer.isEnabled = false
-        menu.addItem(topSpacer)
-        menu.addItem(.separator())
+        // 顶部标题行：NetSpeed（大一号、加粗）+ 最右侧关闭按钮。
+        // 视图项宽度决定菜单宽度，因此先按行内容算好整宽再构造，按钮才能贴到最右缘。
+        menu.addItem(headerItem(width: menuContentWidth(nameW: nameW)))
 
         for p in topProcesses {
             menu.addItem(processItem(p.name,
@@ -640,36 +705,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(powerItem(iconName: batteryPowerIconName,
                                label: "电池充电功率",
                                value: formatWatts(batteryPowerW)))
-        menu.addItem(.separator())
+    }
 
-        // 底部功能项：原生 NSMenuItem(title:action:) —— 系统原生高亮蓝条 + 原生点击。
-        // 图标走原生 image 槽位（与功耗行同一列），标题左缘与进程名列同一条竖线。
-        func footerItem(_ title: String, action: Selector, symbol: String) -> NSMenuItem {
-            let it = NSMenuItem(title: "", action: action, keyEquivalent: "")
-            it.target = self
-            it.isEnabled = true
-            it.attributedTitle = NSAttributedString(string: title, attributes: [
-                .font: menuFooterFont,
-                .foregroundColor: NSColor.labelColor,
-            ])
-            it.image = menuSymbolImage(symbol, accessibilityDescription: title)
-            return it
+    /// 打开活动监视器并落到指定标签页（0=CPU 1=内存 2=能耗 3=磁盘 4=网络）。
+    ///
+    /// 活动监视器只在【启动时】读取 `SelectedTab` 偏好，且没有可用的命令行参数切换标签页
+    /// （`strings` 里只有一个 `-file`），运行中改偏好或传参都不会切页。
+    /// 因此这里的策略是：未运行 → 先写偏好再启动，保证落在目标页；
+    /// 已运行 → 只把它激活到前台，不改动用户当前的标签页与窗口状态。
+    private func openActivityMonitor(tab: Int) {
+        let bundleID = "com.apple.ActivityMonitor"
+        if let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {
+            running.activate(options: [.activateAllWindows])
+            return
         }
-        menu.addItem(footerItem("打开活动监视器", action: #selector(openActivityMonitor),
-                                symbol: activityMonitorIconName))
-        menu.addItem(footerItem("退出 NetSpeed", action: #selector(quitApp),
-                                symbol: quitIconName))
+        let defaults = UserDefaults(suiteName: bundleID)
+        defaults?.set(tab, forKey: "SelectedTab")
+        defaults?.synchronize()
+        NSWorkspace.shared.open(URL(fileURLWithPath: activityMonitorPath))
     }
 
-    @objc private func openActivityMonitor() {
-        let path = "/System/Applications/Utilities/Activity Monitor.app"
-        NSWorkspace.shared.open(URL(fileURLWithPath: path))
-    }
-
-    // 直接用 NSApp.terminate(nil) 退出（本应用为纯状态栏 accessory 应用，无文档窗口，直接结束进程即可）
-    @objc private func quitApp() {
-        NSApp.terminate(nil)
-    }
+    @objc private func openActivityMonitorNetwork() { openActivityMonitor(tab: 4) }
+    @objc private func openActivityMonitorEnergy() { openActivityMonitor(tab: 2) }
 
     // MARK: 定时刷新
 
