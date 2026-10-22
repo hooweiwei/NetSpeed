@@ -109,6 +109,9 @@ func formatWatts(_ watts: Double) -> String {
 // 这里用 [UInt8] 手工读写，避免 Swift 结构体布局/对齐与 C 不一致。
 // PSTR = Total System Power（系统自身功耗）；PDTR = DC 输入功率（适配器输入，含充电）。
 // 两个 key 都是未公开 SMC key，且可能因机型/系统版本缺失；读不到时返回 nil。
+//
+// 电池充电功率不走 SMC：Apple Silicon 上 PPBR 是电池放电轨读数，充电时并不可靠，
+// 因此改为读取 AppleSmartBattery 的 Amperage × Voltage，并以 IsCharging 判断是否在充电。
 
 final class PowerSampler {
     private var connection: io_connect_t = 0
@@ -222,6 +225,29 @@ final class PowerSampler {
             | UInt32(bytes[offset + 2]) << 16
             | UInt32(bytes[offset + 3]) << 24
     }
+}
+
+// MARK: - 电池充电功率：AppleSmartBattery 的电压 × 电流（未充电时为 0W）
+
+func batteryChargingWatts() -> Double? {
+    let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
+    guard service != 0 else { return nil }
+    defer { IOObjectRelease(service) }
+
+    func number(_ key: String) -> NSNumber? {
+        guard let value = IORegistryEntryCreateCFProperty(
+            service, key as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() else { return nil }
+        return value as? NSNumber
+    }
+
+    // 电池供电、充满、优化充电暂停都算「未充电」→ 统一显示 0W
+    guard number("IsCharging")?.boolValue == true else { return 0 }
+    guard let voltageMV = number("Voltage")?.doubleValue, voltageMV > 0 else { return nil }
+    let currentMA = number("Amperage")?.doubleValue
+        ?? number("InstantAmperage")?.doubleValue ?? 0
+    // 适配器功率不足时系统可能仍报 IsCharging，但电流为负（实际在放电）→ 按 0W 处理
+    guard currentMA > 0 else { return 0 }
+    return currentMA * voltageMV / 1_000_000
 }
 
 // MARK: - 等宽对齐工具：菜单是比例字体环境，按「真实渲染宽度」补空格对齐
@@ -424,12 +450,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private var lastSample: (rx: Int64, tx: Int64)?
 
-    // 功耗：SMC PSTR（系统自身）/ PDTR（适配器输入），2 秒采样 + EMA 平滑
+    // 功耗：SMC PSTR（系统运行）/ PDTR（电源输入）+ 电池充电功率，2 秒采样 + EMA 平滑
     private let powerSampler = PowerSampler()
     private var systemPowerW: Double = 0
     private var adapterPowerW: Double = 0
+    private var batteryPowerW: Double = 0
     private var systemPowerHasSample = false
     private var adapterPowerHasSample = false
+    private var batteryPowerHasSample = false
     private let powerSmoothingFactor = 0.3
     private let systemPowerIconName = "bolt.fill"
     private let adapterPowerIconName: String = {
@@ -437,6 +465,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil { return name }
         }
         return "bolt.fill"
+    }()
+    private let batteryPowerIconName: String = {
+        // 实心电池块 + 闪电（无内边框），与 bolt.fill / powerplug.fill 的实心风格一致
+        for name in ["bolt.batteryblock.fill", "battery.100.bolt", "battery.100"] {
+            if NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil { return name }
+        }
+        return "battery.100"
     }()
     // 底部功能项图标：与功耗行同为面性填充风格；旧系统回退到填充柱状图/原线框符号。
     private let activityMonitorIconName: String = {
@@ -546,7 +581,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         topProcesses
             .map { "\($0.name)|\(formatSpeed($0.down))|\(formatSpeed($0.up))" }
             .joined(separator: "\n")
-            + "\nPWR|\(formatWatts(systemPowerW))|\(formatWatts(adapterPowerW))"
+            + "\nPWR|\(formatWatts(systemPowerW))|\(formatWatts(adapterPowerW))|\(formatWatts(batteryPowerW))"
     }
 
     /// 菜单打开中 → 直接重填当前打开的菜单，Top10 与状态栏同步实时刷新。
@@ -636,11 +671,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // 功耗汇总：图标左缘与底部功能项对齐，数值右对齐到表格右缘。
         menu.addItem(powerItem(iconName: systemPowerIconName,
-                               label: "系统总功耗",
+                               label: "系统运行功耗",
                                value: formatWatts(systemPowerW)))
         menu.addItem(powerItem(iconName: adapterPowerIconName,
-                               label: "电源总功耗",
+                               label: "电源输入功率",
                                value: formatWatts(adapterPowerW)))
+        menu.addItem(powerItem(iconName: batteryPowerIconName,
+                               label: "电池充电功率",
+                               value: formatWatts(batteryPowerW)))
         menu.addItem(separatorView(width: contentW, padW: menuSidePadW))
 
         // 底部功能项：系统 NSMenuItem(title:action:) —— 自带系统原生高亮蓝条 + 原生点击。
@@ -699,7 +737,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func refresh() {
-        // SMC 功耗（PSTR/PDTR）：读不到时按 0W 处理
+        // 功耗（PSTR/PDTR + 电池充电）：读不到时按 0W 处理
         refreshPower()
 
         // 状态栏总网速
@@ -715,13 +753,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sampleProcesses()
     }
 
-    // MARK: SMC 功耗采样
+    // MARK: 功耗采样
 
     private func refreshPower() {
         applyPowerSample(powerSampler.systemPowerWatts(),
                          into: &systemPowerW, hasSample: &systemPowerHasSample)
         applyPowerSample(powerSampler.adapterPowerWatts(),
                          into: &adapterPowerW, hasSample: &adapterPowerHasSample)
+        applyPowerSample(batteryChargingWatts(),
+                         into: &batteryPowerW, hasSample: &batteryPowerHasSample)
     }
 
     /// EMA 平滑；读不到时立即回落到 0W（PDTR 在电池供电时也是 0）。
@@ -833,14 +873,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 }
 
-// 调试模式：--debug-power 连续打印 5 次 SMC PSTR/PDTR 功耗后退出。
+// 调试模式：--debug-power 连续打印 5 次 PSTR/PDTR 与电池充电功率后退出。
 if CommandLine.arguments.contains("--debug-power") {
     let sampler = PowerSampler()
     for i in 0..<5 {
         let pstr = sampler.systemPowerWatts()
         let pdtr = sampler.adapterPowerWatts()
+        let battery = batteryChargingWatts()
         print("PSTR=\(pstr.map { String(format: "%.2f", $0) } ?? "nil") "
-            + "PDTR=\(pdtr.map { String(format: "%.2f", $0) } ?? "nil")")
+            + "PDTR=\(pdtr.map { String(format: "%.2f", $0) } ?? "nil") "
+            + "BATT=\(battery.map { String(format: "%.2f", $0) } ?? "nil")")
         if i < 4 { Thread.sleep(forTimeInterval: 1) }
     }
     sampler.close()

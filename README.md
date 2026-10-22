@@ -1,6 +1,6 @@
 # NetSpeed
 
-> macOS 菜单栏实时网速监控小工具 —— 显示上传/下载速率，点开查看 Top10 进程流量与整机功耗。
+> macOS 菜单栏实时网速监控小工具 —— 显示上传/下载速率，点开查看 Top10 进程流量、整机功耗与电池充电功率。
 > A lightweight macOS menu bar app that shows live upload/download speed on the status bar and per-process traffic on click.
 
 ![status bar](docs/screenshots/statusbar.png)
@@ -10,7 +10,7 @@
 - **状态栏实时网速**：`↑上传 / ↓下载` 两行，每 2 秒刷新一次。
 - **智能单位与精度**：KB/s 整数；`1.0~9.9MB/s` 保留 1 位小数；`≥10MB/s` 与 GB/s 用整数；状态栏预留宽度固定（不跳动、不加宽）。
 - **Top10 进程流量**：点击状态栏展开菜单，按总流量排序显示前 10 个进程的上传/下载速度（方向箭头 `↓`/`↑` 与状态栏一致）。
-- **整机功耗显示**：Top10 下方显示系统总功耗（SMC `PSTR`）与电源总功耗（SMC `PDTR`），每 2 秒采样并做 EMA 平滑；读不到时显示 `0W`。
+- **功耗显示**：Top10 下方显示系统运行功耗（SMC `PSTR`）、电源输入功率（SMC `PDTR`）与电池充电功率（`AppleSmartBattery` 电压 × 电流），每 2 秒采样并做 EMA 平滑；读不到或未充电时显示 `0W`。
 - **深浅色自适应文字**：进程列表文字用系统语义色 `labelColor`，浅色模式下近黑、深色模式下纯白，随系统外观自动切换；夜间深色菜单里不再发灰看不清。
 - **计入 AirDrop/接力流量**：统计口径含 `awdl0`（隔空投送、接力、随航的专用直连链路），AirDrop 传文件时状态栏总速度与进程列表中的 `sharingd` 口径一致。
 - **菜单对齐像素级**：进程名、速度列、功耗行、底部"打开活动监视器 / 退出 NetSpeed"在同一竖线；底部两项使用**系统原生高亮蓝条**与原生点击，各带一枚 **SF Symbols 面性图标**（心电图方框 `waveform.path.ecg.rectangle.fill` / 电源圆 `power.circle.fill`），悬停时图标与文字自动变白；功耗行标签与底部项同为 13pt、行距同为 24pt，数值使用进程列表同款 JetBrains Mono 11pt。
@@ -20,7 +20,7 @@
 
 ![menu](docs/screenshots/menu.png)
 
-状态栏显示 `119KB/s↑ / 2.4MB/s↓` 这类读数（KB/s 整数、小数值保留 1 位小数）；点开后是一个按流量排序的 Top10 进程列表，下方依次显示系统总功耗与电源总功耗，底部两行前各有一枚面性 SF Symbols 图标（心电图方框 = 打开活动监视器、电源圆 = 退出 NetSpeed），悬停蓝条时图标与文字自动变白。进程列表文字随系统外观自适应：浅色模式近黑、深色模式纯白，与底部功能项同色。
+状态栏显示 `119KB/s↑ / 2.4MB/s↓` 这类读数（KB/s 整数、小数值保留 1 位小数）；点开后是一个按流量排序的 Top10 进程列表，下方依次显示系统运行功耗、电源输入功率与电池充电功率，底部两行前各有一枚面性 SF Symbols 图标（心电图方框 = 打开活动监视器、电源圆 = 退出 NetSpeed），悬停蓝条时图标与文字自动变白。进程列表文字随系统外观自适应：浅色模式近黑、深色模式纯白，与底部功能项同色。
 
 > 图标使用 SF Symbols，需要 macOS 11+（`LSMinimumSystemVersion` 已设为 12.0）。
 
@@ -81,7 +81,7 @@ defaults read /Applications/NetSpeed.app/Contents/Info.plist NetSpeedGitDescribe
 
 ### 自动发布（推荐）
 
-`git push origin main vX.Y.Z` 推上 tag（形如 `v1.4`）后，CI 自动编译 → 打包 → 建 Release → 上传 assets，
+`git push origin main vX.Y.Z` 推上 tag（形如 `v1.4.1`）后，CI 自动编译 → 打包 → 建 Release → 上传 assets，
 Release 正文取 README「更新日志」中该版本的条目。授权用 workflow 内置的 `GITHUB_TOKEN`
 （`permissions: contents: write`），**无需配置任何 secret**。非 tag 触发（main push / PR / 手动）只上传 CI 工件，不发 Release。
 
@@ -104,7 +104,7 @@ dist/release/
 └── SHA256SUMS.txt              # 校验和
 ```
 
-以当前版本为例即 `NetSpeed-1.4-arm64.dmg`。
+以当前版本为例即 `NetSpeed-1.4.1-arm64.dmg`。
 
 单独打 dmg：`./make_dmg.sh [arch]`（依赖 `dist/<arch>/NetSpeed.app` 已存在），dmg 卷内自带指向 `/Applications` 的链接，拖进去即完成安装。
 
@@ -122,7 +122,7 @@ dist/release/
 ## 🚀 使用方法
 
 1. 运行后，状态栏出现网速读数（两个箭头分别表示上传/下载）。
-2. 点击读数展开菜单，查看 Top10 进程的实时流量与两条整机功耗。
+2. 点击读数展开菜单，查看 Top10 进程的实时流量与三项功耗数据。
 3. 菜单底部：
    - **打开活动监视器** —— 打开系统"活动监视器"。
    - **退出 NetSpeed** —— 退出应用。
@@ -133,7 +133,7 @@ dist/release/
 - **总网速采样**：`sysctl(NET_RT_IFLIST2)` 读取网卡累计收发字节数，两次采样做差除以间隔得到速率。统计口径为 `en*` 物理网卡 **+ `awdl0`**（AirDrop/接力/随航专用直连链路）；排除 `utun*`（VPN 如 ClashX TUN 的流量已在底层物理网卡计过，避免双重计数）与 `lo0`/`llw0`/`bridge0`/`anpi*`。路由消息按 `msglen` 紧凑排列，Swift 中用字节拷贝（`readLE`）读取避免未对齐 UB。
 - **计数器回绕**：macOS 26 内核把接口字节计数器按 32 位写入（高 32 位恒为 0），累计值在 4.29GB（2³²）处回绕；且消息结构从 160B 变为 180B（新增字段在尾部，`ibytes@+96`/`obytes@+104` 偏移未变）。速度差分统一用 `wrapDelta32()` 低 32 位回绕减法，只要单次采样间隔流量 < 4.29GB 结果就完全正确（也兼容老系统真 64 位计数器）。
 - **Top10 进程流量**：每轮调用 `nettop -P -L 1 -x -n` 获取各进程累计入/出字节，与上一次快照做差求速度；在后台线程执行，不阻塞主线程。进程统计与接口无关，因此 AirDrop 由 `sharingd` 承载、会出现在列表中。注意 nettop 的进程累计值是真 64 位但**不单调**（连接关闭时统计会回退），做差需钳位为 0。
-- **整机功耗**：通过 IOKit `AppleSMC` 用户客户端读取 `PSTR`（系统总功耗）与 `PDTR`（电源适配器输入功耗），免 root；key 缺失或数值异常时按 0W 处理，2 秒采样并用 EMA（α=0.3）平滑，避免数字跳动。
+- **功耗与充电功率**：通过 IOKit `AppleSMC` 用户客户端读取 `PSTR`（系统运行功耗）与 `PDTR`（电源输入功率），免 root；key 缺失或数值异常时按 0W 处理。电池充电功率读取 `AppleSmartBattery` 的 `Voltage × Amperage`，未充电时固定 0W（Apple Silicon 的 SMC `PPBR` 是电池放电轨读数，充电时不可靠）。三项均 2 秒采样并用 EMA（α=0.3）平滑，避免数字跳动。
 - **状态栏渲染**：把上下两行文字画成 `NSImage`，文字右对齐、箭头贴右缘固定，并显式设 `statusItem.length` 消除系统默认 padding，保证宽度恒定不跳动。
 - **菜单对齐与配色**：菜单是比例字体环境，用"真实渲染宽度"（`NSAttributedString` 实测像素宽）补空格对齐各列；底部功能项为系统 `NSMenuItem`，用前导空格使其与进程名首列在同一竖线。进程行是自绘 `RowView`，功耗行是自绘 `PowerRowView`（图标 + 标签 + 右对齐数值，行高与原生菜单项一致），文字均用语义色 `labelColor`（浅色近黑 / 深色纯白），随系统深色模式自动切换。
 
@@ -144,7 +144,7 @@ dist/arm64/NetSpeed.app/Contents/MacOS/NetSpeed --debug-bytes
 # 输出 rx=... tx=...（累计字节数），可与 `netstat -ib` 的 en*+awdl0 合计对账。
 # 注意 macOS 26 上该值会在 4.29GB 处回绕（内核行为），对账请比较差分而非绝对值。
 
-# 功耗对账：连续打印 5 次 PSTR/PDTR 原始瓦数
+# 功耗对账：连续打印 5 次 PSTR/PDTR 与电池充电功率
 dist/arm64/NetSpeed.app/Contents/MacOS/NetSpeed --debug-power
 ```
 
@@ -170,6 +170,7 @@ NetSpeed/
 
 ## 📜 更新日志
 
+- **1.4.1（2026-10-22）**：功耗信息细化——「系统总功耗」更名为「系统运行功耗」，「电源总功耗」更名为「电源输入功率」，并新增第三行「电池充电功率」（SF Symbols `bolt.batteryblock.fill` 实心电池块 + 闪电图标，读取 `AppleSmartBattery` 的电压 × 电流，未充电时显示 `0W`）；三行图标、字号、行距与数值对齐完全一致。
 - **1.4（2026-10-22）**：新增整机功耗显示——Top10 下方新增系统总功耗（SMC `PSTR`）与电源总功耗（SMC `PDTR`）两条数据行及分隔线，2 秒采样 + EMA 平滑，读不到时显示 `0W`。底部"打开活动监视器 / 退出 NetSpeed"图标改为面性风格（`waveform.path.ecg.rectangle.fill` / `power.circle.fill`）；功耗行行距对齐原生菜单项 24pt、标签 13pt，数值改用 JetBrains Mono 11pt；新增 `--debug-power` 调试开关。
 - **1.3.1（2026-10-09）**：状态栏 ↑/↓ 箭头由彩色（`.systemRed`/`.systemBlue`）改为与数值同色 `.labelColor`——深色菜单栏为白、浅色菜单栏为黑，随系统外观自适应，两行视觉统一。
 - **1.3（2026-10-02）**：固定 Top10 菜单宽度——进程名列在菜单打开瞬间按当时最宽名字钉住，打开期间重填沿用；速度两列按最坏情况（`999MB/s`）恒定预留，文字右对齐向左扩展，箭头贴右缘不动，菜单宽度不再逐帧抖动。
