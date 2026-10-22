@@ -1,5 +1,6 @@
 import AppKit
 import Darwin
+import IOKit
 
 // MARK: - 网速采样：sysctl(NET_RT_IFLIST2) 读取物理网卡与 awdl0 的累计收发字节数
 //
@@ -90,6 +91,139 @@ func formatSpeed(_ bytesPerSec: Double) -> String {
     return "\(Int(gb.rounded()))GB/s"
 }
 
+// MARK: - 功耗格式化：最多 1 位小数，整数去掉 .0（9.2W / 30W / 0W）
+
+func formatWatts(_ watts: Double) -> String {
+    guard watts.isFinite else { return "0W" }
+    let clamped = min(max(watts, 0), 999.9)
+    let tenths = Int((clamped * 10).rounded())
+    if tenths % 10 == 0 { return "\(tenths / 10)W" }
+    return String(format: "%.1fW", Double(tenths) / 10)
+}
+
+// MARK: - SMC 功耗采样：AppleSMC 的 PSTR / PDTR（免 root）
+//
+// AppleSMC 用户客户端只接受固定的 80 字节 SMCKeyData_t（64 位布局），字段偏移：
+//   key(u32)@0, keyInfo.dataSize(u32)@28, keyInfo.dataType(u32)@32,
+//   result(u8)@40, data8(u8)@42, bytes[32]@48
+// 这里用 [UInt8] 手工读写，避免 Swift 结构体布局/对齐与 C 不一致。
+// PSTR = Total System Power（系统自身功耗）；PDTR = DC 输入功率（适配器输入，含充电）。
+// 两个 key 都是未公开 SMC key，且可能因机型/系统版本缺失；读不到时返回 nil。
+
+final class PowerSampler {
+    private var connection: io_connect_t = 0
+    private var knownKeySizes: [String: UInt32] = [:]
+
+    private static let structSize = 80
+    private static let kernelIndexSMC: UInt32 = 2
+    private static let cmdReadBytes: UInt8 = 5
+    private static let cmdReadKeyInfo: UInt8 = 9
+    private static let offKey = 0
+    private static let offDataSize = 28
+    private static let offDataType = 32
+    private static let offResult = 40
+    private static let offData8 = 42
+    private static let offBytes = 48
+    private static let floatType: UInt32 = 0x666c_7420   // "flt "
+
+    init() { openIfNeeded() }
+    deinit { close() }
+
+    func systemPowerWatts() -> Double? { readFloat("PSTR").map(Double.init) }
+    func adapterPowerWatts() -> Double? { readFloat("PDTR").map(Double.init) }
+
+    func close() {
+        guard connection != 0 else { return }
+        IOServiceClose(connection)
+        connection = 0
+    }
+
+    private func openIfNeeded() {
+        guard connection == 0 else { return }
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSMC"))
+        guard service != 0 else { return }
+        defer { IOObjectRelease(service) }
+        var conn: io_connect_t = 0
+        guard IOServiceOpen(service, mach_task_self_, 0, &conn) == KERN_SUCCESS else { return }
+        connection = conn
+    }
+
+    private func readFloat(_ key: String) -> Float? {
+        openIfNeeded()
+        guard connection != 0 else { return nil }
+
+        let size: UInt32
+        if let cached = knownKeySizes[key] {
+            size = cached
+        } else {
+            guard let info = readKeyInfo(key),
+                  info.size == 4,
+                  info.type == Self.floatType else { return nil }
+            size = info.size
+            knownKeySizes[key] = size
+        }
+        guard size == 4 else { return nil }
+
+        var input = [UInt8](repeating: 0, count: Self.structSize)
+        writeUInt32(Self.packKey(key), to: &input, at: Self.offKey)
+        writeUInt32(size, to: &input, at: Self.offDataSize)
+        input[Self.offData8] = Self.cmdReadBytes
+        guard let output = call(input), output[Self.offResult] == 0 else { return nil }
+
+        // Apple Silicon 的 SMC flt 为小端 IEEE-754；PSTR/PDTR 均走这一分支。
+        let bits = UInt32(output[Self.offBytes])
+            | UInt32(output[Self.offBytes + 1]) << 8
+            | UInt32(output[Self.offBytes + 2]) << 16
+            | UInt32(output[Self.offBytes + 3]) << 24
+        let watts = Float(bitPattern: bits)
+        guard watts.isFinite, watts >= 0, watts < 1000 else { return nil }
+        return watts
+    }
+
+    private func readKeyInfo(_ key: String) -> (size: UInt32, type: UInt32)? {
+        var input = [UInt8](repeating: 0, count: Self.structSize)
+        writeUInt32(Self.packKey(key), to: &input, at: Self.offKey)
+        input[Self.offData8] = Self.cmdReadKeyInfo
+        guard let output = call(input) else { return nil }
+        return (readUInt32(output, at: Self.offDataSize),
+                readUInt32(output, at: Self.offDataType))
+    }
+
+    private func call(_ input: [UInt8]) -> [UInt8]? {
+        var output = [UInt8](repeating: 0, count: Self.structSize)
+        var outputSize = Self.structSize
+        let kr = input.withUnsafeBytes { inputRaw in
+            output.withUnsafeMutableBytes { outputRaw in
+                IOConnectCallStructMethod(
+                    connection, Self.kernelIndexSMC,
+                    inputRaw.baseAddress, Self.structSize,
+                    outputRaw.baseAddress, &outputSize)
+            }
+        }
+        return kr == KERN_SUCCESS ? output : nil
+    }
+
+    private static func packKey(_ key: String) -> UInt32 {
+        var value: UInt32 = 0
+        for byte in key.utf8 { value = (value << 8) | UInt32(byte) }
+        return value
+    }
+
+    private func writeUInt32(_ value: UInt32, to bytes: inout [UInt8], at offset: Int) {
+        bytes[offset] = UInt8(truncatingIfNeeded: value)
+        bytes[offset + 1] = UInt8(truncatingIfNeeded: value >> 8)
+        bytes[offset + 2] = UInt8(truncatingIfNeeded: value >> 16)
+        bytes[offset + 3] = UInt8(truncatingIfNeeded: value >> 24)
+    }
+
+    private func readUInt32(_ bytes: [UInt8], at offset: Int) -> UInt32 {
+        UInt32(bytes[offset])
+            | UInt32(bytes[offset + 1]) << 8
+            | UInt32(bytes[offset + 2]) << 16
+            | UInt32(bytes[offset + 3]) << 24
+    }
+}
+
 // MARK: - 等宽对齐工具：菜单是比例字体环境，按「真实渲染宽度」补空格对齐
 // 不按字符数估算（CJK 宽度随回退字体浮动），空格数由 NSAttributedString 实测像素宽换算
 
@@ -97,6 +231,7 @@ func formatSpeed(_ bytesPerSec: Double) -> String {
 // 进程区文字 11pt；底部功能项用系统 13pt（"打开活动监视器"字号）。
 let menuFont = NSFont(name: "JetBrains Mono", size: 11) ?? NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
 let menuFooterFont = NSFont.menuFont(ofSize: 13)         // 底部功能项：系统标准字体 13pt
+let menuFooterIconTextGapW = NSAttributedString(string: "  ", attributes: [.font: menuFooterFont]).size().width
 // 底部功能项前导空格数：把"打开活动监视器/退出 NetSpeed"首字推到与进程名首列(padW)对齐。
 // 实测：系统项原生左内边距 K 使"退"落在进程列左缘左侧约 8 物理px(4 逻辑pt)，1 个 13pt 空格≈7.3 物理px即补上。
 let footerLeadingSpaces = 1
@@ -224,12 +359,98 @@ final class RowView: NSView {
     }
 }
 
+/// 功耗行：图标 + 左对齐标签 + 右对齐数值，不可点击。
+/// 图标左缘与底部功能项图标对齐（menuSidePadW），数值右缘与表格右缘对齐。
+final class PowerRowView: NSView {
+    private static let iconSize: CGFloat = 13
+    /// 与原生底部菜单项同高（实测原生项高亮条 24pt），功耗行行距因此与底部项一致。
+    private static let rowHeight: CGFloat = 24
+
+    private let label: NSAttributedString
+    private let value: NSAttributedString
+    private let leftInset: CGFloat
+    private let contentW: CGFloat
+    private let iconView: NSImageView?
+
+    init(iconName: String, label: String, value: String,
+         contentW: CGFloat, leftInset: CGFloat) {
+        self.label = NSAttributedString(string: label, attributes: [
+            .font: menuFooterFont, .foregroundColor: NSColor.labelColor])
+        // 数值与上方进程列表同字体（JetBrains Mono 11pt），标签与底部功能项同字体（13pt）。
+        self.value = NSAttributedString(string: value, attributes: [
+            .font: menuFont, .foregroundColor: NSColor.labelColor])
+        self.leftInset = leftInset
+        self.contentW = contentW
+
+        if let base = NSImage(systemSymbolName: iconName, accessibilityDescription: label) {
+            let cfg = NSImage.SymbolConfiguration(pointSize: Self.iconSize, weight: .semibold)
+            let img = base.withSymbolConfiguration(cfg) ?? base
+            img.isTemplate = true
+            let iv = NSImageView()
+            iv.image = img
+            iv.contentTintColor = .labelColor
+            iv.imageScaling = .scaleProportionallyUpOrDown
+            iv.frame = NSRect(x: leftInset,
+                              y: (Self.rowHeight - Self.iconSize) / 2,
+                              width: Self.iconSize, height: Self.iconSize)
+            self.iconView = iv
+        } else {
+            self.iconView = nil
+        }
+
+        super.init(frame: NSRect(x: 0, y: 0,
+                                 width: leftInset + contentW + leftInset,
+                                 height: Self.rowHeight))
+        if let iconView { addSubview(iconView) }
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) 未实现") }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let labelX = leftInset + Self.iconSize + menuFooterIconTextGapW
+        let labelSize = label.size()
+        label.draw(at: NSPoint(x: labelX, y: (bounds.height - labelSize.height) / 2))
+
+        let valueSize = value.size()
+        value.draw(at: NSPoint(x: leftInset + contentW - valueSize.width,
+                               y: (bounds.height - valueSize.height) / 2))
+    }
+}
+
 // MARK: - 应用逻辑：状态栏 + 2 秒定时刷新 + Top10 进程流量菜单
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let refreshInterval: TimeInterval = 2
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private var lastSample: (rx: Int64, tx: Int64)?
+
+    // 功耗：SMC PSTR（系统自身）/ PDTR（适配器输入），2 秒采样 + EMA 平滑
+    private let powerSampler = PowerSampler()
+    private var systemPowerW: Double = 0
+    private var adapterPowerW: Double = 0
+    private var systemPowerHasSample = false
+    private var adapterPowerHasSample = false
+    private let powerSmoothingFactor = 0.3
+    private let systemPowerIconName = "bolt.fill"
+    private let adapterPowerIconName: String = {
+        for name in ["powerplug.fill", "powerplug"] {
+            if NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil { return name }
+        }
+        return "bolt.fill"
+    }()
+    // 底部功能项图标：与功耗行同为面性填充风格；旧系统回退到填充柱状图/原线框符号。
+    private let activityMonitorIconName: String = {
+        for name in ["waveform.path.ecg.rectangle.fill", "chart.bar.fill", "waveform.path.ecg"] {
+            if NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil { return name }
+        }
+        return "waveform.path.ecg"
+    }()
+    private let quitIconName: String = {
+        for name in ["power.circle.fill", "power"] {
+            if NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil { return name }
+        }
+        return "power"
+    }()
 
     // 进程流量：nettop 的 bytes 是进程启动以来的累计值，本地存上一次快照做差求速度
     private var procLast: [String: (inBytes: Int64, outBytes: Int64)] = [:]
@@ -281,6 +502,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// 进程结束系统本也会回收，但显式 endActivity 更清晰，
     /// 也避免个别情况下（如 NSApp.terminate）令牌句柄悬空。
     func applicationWillTerminate(_ notification: Notification) {
+        powerSampler.close()
         guard let token = activityToken else { return }
         ProcessInfo.processInfo.endActivity(token)
         activityToken = nil
@@ -324,6 +546,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         topProcesses
             .map { "\($0.name)|\(formatSpeed($0.down))|\(formatSpeed($0.up))" }
             .joined(separator: "\n")
+            + "\nPWR|\(formatWatts(systemPowerW))|\(formatWatts(adapterPowerW))"
     }
 
     /// 菜单打开中 → 直接重填当前打开的菜单，Top10 与状态栏同步实时刷新。
@@ -388,6 +611,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return it
         }
 
+        func powerItem(iconName: String, label: String, value: String) -> NSMenuItem {
+            let padW = menuSidePadW
+            let totalW = padW + contentW + padW
+            let view = PowerRowView(iconName: iconName, label: label, value: value,
+                                    contentW: contentW, leftInset: padW)
+            view.frame = NSRect(x: 0, y: 0, width: totalW,
+                                height: view.frame.height)   // 高度由 PowerRowView 决定（与原生项一致）
+            let it = NSMenuItem()
+            it.view = view
+            it.isEnabled = false
+            return it
+        }
+
         for p in topProcesses {
             let down = formatSpeed(p.down) + downArrow
             let up = formatSpeed(p.up) + upArrow
@@ -396,6 +632,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // 自定义横线：宽度=数据区总宽（与进程行同一表达式，必然相等），
         // 左端=第一列左缘、右端=第三列(↑)右缘，与进程行、底部项对齐。
+        menu.addItem(separatorView(width: contentW, padW: menuSidePadW))
+
+        // 功耗汇总：图标左缘与底部功能项对齐，数值右对齐到表格右缘。
+        menu.addItem(powerItem(iconName: systemPowerIconName,
+                               label: "系统总功耗",
+                               value: formatWatts(systemPowerW)))
+        menu.addItem(powerItem(iconName: adapterPowerIconName,
+                               label: "电源总功耗",
+                               value: formatWatts(adapterPowerW)))
         menu.addItem(separatorView(width: contentW, padW: menuSidePadW))
 
         // 底部功能项：系统 NSMenuItem(title:action:) —— 自带系统原生高亮蓝条 + 原生点击。
@@ -426,8 +671,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             it.attributedTitle = attr
             return it
         }
-        menu.addItem(footerItem("打开活动监视器", action: #selector(openActivityMonitor), symbol: "waveform.path.ecg"))
-        menu.addItem(footerItem("退出 NetSpeed", action: #selector(quitApp), symbol: "power"))
+        menu.addItem(footerItem("打开活动监视器", action: #selector(openActivityMonitor),
+                                symbol: activityMonitorIconName))
+        menu.addItem(footerItem("退出 NetSpeed", action: #selector(quitApp),
+                                symbol: quitIconName))
     }
 
     @objc private func openActivityMonitor() {
@@ -452,6 +699,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func refresh() {
+        // SMC 功耗（PSTR/PDTR）：读不到时按 0W 处理
+        refreshPower()
+
         // 状态栏总网速
         let sample = currentBytes()
         if let prev = lastSample {
@@ -463,6 +713,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // 进程流量 Top10（后台跑 nettop，不阻塞主线程）
         sampleProcesses()
+    }
+
+    // MARK: SMC 功耗采样
+
+    private func refreshPower() {
+        applyPowerSample(powerSampler.systemPowerWatts(),
+                         into: &systemPowerW, hasSample: &systemPowerHasSample)
+        applyPowerSample(powerSampler.adapterPowerWatts(),
+                         into: &adapterPowerW, hasSample: &adapterPowerHasSample)
+    }
+
+    /// EMA 平滑；读不到时立即回落到 0W（PDTR 在电池供电时也是 0）。
+    private func applyPowerSample(_ raw: Double?,
+                                  into value: inout Double,
+                                  hasSample: inout Bool) {
+        guard let raw else {
+            value = 0
+            hasSample = false
+            return
+        }
+        let clamped = min(max(raw, 0), 999.9)
+        if !hasSample || clamped <= 0.05 {
+            value = clamped
+            hasSample = true
+            return
+        }
+        value += (clamped - value) * powerSmoothingFactor
     }
 
     // MARK: nettop 采样
@@ -554,6 +831,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         return String(key[..<lastDot]).trimmingCharacters(in: .whitespaces)
     }
+}
+
+// 调试模式：--debug-power 连续打印 5 次 SMC PSTR/PDTR 功耗后退出。
+if CommandLine.arguments.contains("--debug-power") {
+    let sampler = PowerSampler()
+    for i in 0..<5 {
+        let pstr = sampler.systemPowerWatts()
+        let pdtr = sampler.adapterPowerWatts()
+        print("PSTR=\(pstr.map { String(format: "%.2f", $0) } ?? "nil") "
+            + "PDTR=\(pdtr.map { String(format: "%.2f", $0) } ?? "nil")")
+        if i < 4 { Thread.sleep(forTimeInterval: 1) }
+    }
+    sampler.close()
+    exit(0)
 }
 
 // 调试模式：--debug-bytes 打印一次累计收发字节数后退出。
