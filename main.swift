@@ -264,8 +264,11 @@ func batteryChargingWatts() -> Double? {
 let menuFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
 let menuFooterFont = NSFont.menuFont(ofSize: 13)
 
-/// 菜单图标在菜单里的目标尺寸（系统图标槽位为 16pt）。
+/// 菜单图标槽位宽度（系统菜单项的图标列固定 16pt）。
 let menuIconTargetSize: CGFloat = 16
+/// 功耗行图标里图形本身的高度：不超过「系统运行功耗」这行文字的墨迹高度（实测 11.75pt）。
+/// 画布仍是 16pt，所以缩小图标不会让文字左移。
+let menuPowerIconInkSize: CGFloat = 11.5
 /// 标题行 logo 尺寸（与标题文字视觉高度相当）。
 let menuLogoSize: CGFloat = 15
 
@@ -349,8 +352,23 @@ final class MenuHeaderView: NSView {
         let logoRect = NSRect(x: menuHeaderLeadingInset,
                               y: (bounds.height - menuLogoSize) / 2,
                               width: menuLogoSize, height: menuLogoSize)
-        // 模板图由绘制上下文的 tint 着色，这里直接画即可
-        logo.draw(in: logoRect, from: .zero, operation: .sourceOver, fraction: 1.0)
+        // 模板图只有画在系统控件里才会被自动着色，直接 draw 会保留 SVG 原本的白色，
+        // 浅色外观下就看不见了。这里按绘制时的外观把它染成 labelColor。
+        Self.tintedTemplate(logo, color: .labelColor)
+            .draw(in: logoRect, from: .zero, operation: .sourceOver, fraction: 1.0)
+    }
+
+    /// 把单色图染成指定颜色。logo 是单色形状，所以不需要单独的深色资源。
+    /// 用 drawingHandler 而不是 lockFocus：handler 在实际绘制时才执行，
+    /// `labelColor` 会按当时的绘制外观解析，浅色/深色自动跟随，也不用缓存。
+    private static func tintedTemplate(_ image: NSImage, color: NSColor) -> NSImage {
+        let size = image.size
+        return NSImage(size: size, flipped: false) { rect in
+            image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0)
+            color.setFill()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
     }
 
     @objc private func closeTapped() {
@@ -549,10 +567,16 @@ let menuInvisibleIcon: NSImage = {
 /// 2. 符号自带大量内边距（bolt.fill 在 13pt 画布里图形只有约 4×6pt），
 ///    直接按画布缩放会显得很小；因此先量出图形的实际像素边界，裁掉留白再放大。
 /// isTemplate = true 让图标跟随标题颜色（高亮时变白）。
+/// - Parameters:
+///   - targetSize: 画布边长，即菜单图标槽位的宽度。必须保持 16pt，
+///     否则槽位变窄会让标题整体左移，功耗行就与进程行的第一列对不齐了。
+///   - inkSize: 图形本身（墨迹）的边长。想让图标看起来小一点就调这个，而不是调 targetSize。
 func menuSymbolImage(_ source: NSImage,
                       accessibilityDescription: String,
                       pointSize: CGFloat = 13,
-                      targetSize: CGFloat = menuIconTargetSize) -> NSImage? {
+                      targetSize: CGFloat = menuIconTargetSize,
+                      inkSize: CGFloat? = nil) -> NSImage? {
+    let ink = inkSize ?? targetSize
     // SF Symbol 需要按 pointSize 配置；SVG 等普通图没有 symbol 配置，保持原样。
     let sym = source.withSymbolConfiguration(
         NSImage.SymbolConfiguration(pointSize: pointSize, weight: .semibold)) ?? source
@@ -581,11 +605,12 @@ func menuSymbolImage(_ source: NSImage,
     let bbox = inkBounds(probe)
     guard bbox.width > 0, bbox.height > 0 else { return nil }
 
-    // 2) 按墨迹边界裁剪（裁的是像素，因此用像素坐标），再等比放大到目标尺寸
+    // 2) 按墨迹边界裁剪（裁的是像素，因此用像素坐标），再等比放大到墨迹目标尺寸
     let scale: CGFloat = 3
     let px = Int(targetSize * scale)
+    let inkPx = Int(ink * scale)
     let srcW = bbox.width, srcH = bbox.height
-    let scaleFit = min(CGFloat(px) / srcW, CGFloat(px) / srcH)
+    let scaleFit = min(CGFloat(inkPx) / srcW, CGFloat(inkPx) / srcH)
     let dw = srcW * scaleFit / scale, dh = srcH * scaleFit / scale
 
     guard let out = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: px, pixelsHigh: px,
@@ -620,12 +645,13 @@ func menuSymbolImage(_ source: NSImage,
 func menuSymbolImage(_ name: String,
                      accessibilityDescription: String,
                      pointSize: CGFloat = 13,
-                     targetSize: CGFloat = menuIconTargetSize) -> NSImage? {
+                     targetSize: CGFloat = menuIconTargetSize,
+                     inkSize: CGFloat? = nil) -> NSImage? {
     guard let base = NSImage(systemSymbolName: name, accessibilityDescription: accessibilityDescription) else {
         return nil
     }
     return menuSymbolImage(base, accessibilityDescription: accessibilityDescription,
-                           pointSize: pointSize, targetSize: targetSize)
+                           pointSize: pointSize, targetSize: targetSize, inkSize: inkSize)
 }
 
 /// 把图像画进当前上下文。SVG 走 cgImage（`draw(in:)` 在位图上下文里对 SVG 表现不稳定），
@@ -681,7 +707,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var adapterPowerHasSample = false
     private var batteryPowerHasSample = false
     private let powerSmoothingFactor = 0.3
-    private let systemPowerIconName = "bolt.fill"
+    // 芯片图标：语义是「整机」，且与项目 logo（闪电）区分开
+    private let systemPowerIconName: String = {
+        for name in ["cpu.fill", "cpu", "memorychip.fill"] {
+            if NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil { return name }
+        }
+        return "cpu"
+    }()
     private let adapterPowerIconName: String = {
         for name in ["powerplug.fill", "powerplug"] {
             if NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil { return name }
@@ -861,7 +893,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let valueRange = NSRange(location: (label as NSString).length + 2, length: (value as NSString).length)
             attr.addAttribute(.font, value: menuFont, range: valueRange)
             it.attributedTitle = attr
-            it.image = menuSymbolImage(iconName, accessibilityDescription: label)
+            it.image = menuSymbolImage(iconName, accessibilityDescription: label,
+                                       inkSize: menuPowerIconInkSize)
             it.action = #selector(openActivityMonitorEnergy)   // 点击任意功耗行 → 活动监视器「能耗」页
             it.target = self
             it.isEnabled = true
