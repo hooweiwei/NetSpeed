@@ -264,17 +264,26 @@ func batteryChargingWatts() -> Double? {
 let menuFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
 let menuFooterFont = NSFont.menuFont(ofSize: 13)
 
+/// 菜单图标在菜单里的目标尺寸（系统图标槽位为 16pt）。
+let menuIconTargetSize: CGFloat = 16
+/// 标题行 logo 尺寸（与标题文字视觉高度相当）。
+let menuLogoSize: CGFloat = 15
+
 private func measuredWidth(_ s: String) -> CGFloat {
     NSAttributedString(string: s, attributes: [.font: menuFont]).size().width
 }
 
 // MARK: 菜单宽度与标题行
 
-/// 标题行左右内边距：与系统给菜单项标题列的内边距对齐，让「NetSpeed」与进程名同一条竖线。
-let menuHeaderInset: CGFloat = 16
-/// 标题行高度 / 关闭按钮直径。
-let menuHeaderHeight: CGFloat = 34
-let menuCloseButtonSize: CGFloat = 22
+/// 标题行左侧内边距：让 logo 与功耗行图标列左缘对齐。
+/// 视图原点比菜单左缘靠内约 9pt（系统菜单项的内边距），实测 logo 落在 12pt 处即与图标列齐。
+let menuHeaderLeadingInset: CGFloat = 12
+/// 标题行右侧内边距。
+let menuHeaderTrailingInset: CGFloat = 14
+/// 标题行高度。
+let menuHeaderHeight: CGFloat = 30
+/// 标题字号：与系统菜单栏/状态栏同量级（13pt），不再放大。
+let menuHeaderFont = NSFont.systemFont(ofSize: 13, weight: .semibold)
 
 /// 活动监视器路径（系统固定位置）。
 let activityMonitorPath = "/System/Applications/Utilities/Activity Monitor.app"
@@ -285,32 +294,27 @@ func menuContentWidth(nameW: CGFloat) -> CGFloat {
     return stops.last?.location ?? 0
 }
 
-/// 标题行视图：左侧标题文字，右侧关闭按钮。点击关闭按钮退出应用。
+/// 标题行视图：logo + NetSpeed，右侧「退出」胶囊按钮。
 /// 这是菜单里唯一的自定义视图——原生菜单项无法把控件贴到最右缘。
 final class MenuHeaderView: NSView {
     private let titleLabel = NSTextField(labelWithString: "NetSpeed")
-    private let closeButton = NSButton()
+    private let closeButton = ExitPillButton()
     private let onClose: () -> Void
 
     init(contentWidth: CGFloat, onClose: @escaping () -> Void) {
         self.onClose = onClose
-        super.init(frame: NSRect(x: 0, y: 0, width: contentWidth + menuHeaderInset * 2,
+        super.init(frame: NSRect(x: 0, y: 0,
+                                 width: contentWidth + menuHeaderLeadingInset + menuHeaderTrailingInset,
                                  height: menuHeaderHeight))
         autoresizingMask = [.width]
 
-        // 标题：比正文大一号（13 → 15pt），加粗一档（regular → semibold）
-        titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        // 标题：与系统菜单同字号（13pt），略加粗
+        titleLabel.font = menuHeaderFont
         titleLabel.textColor = .labelColor
         titleLabel.lineBreakMode = .byTruncatingTail
         addSubview(titleLabel)
 
-        // 关闭按钮：纯 xmark（悬停由 NSButton 自己给淡底），无边框、无文字
-        closeButton.isBordered = false
-        closeButton.bezelStyle = .inline
-        closeButton.imagePosition = .imageOnly
-        closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "退出 NetSpeed")?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold))
-        closeButton.contentTintColor = .secondaryLabelColor
+        // 退出按钮：文字「退出」+ 胶囊外框，灰色字体，悬停高亮
         closeButton.target = self
         closeButton.action = #selector(closeTapped)
         closeButton.toolTip = "退出 NetSpeed"
@@ -321,20 +325,96 @@ final class MenuHeaderView: NSView {
 
     override func layout() {
         super.layout()
-        let titleH: CGFloat = 20
-        titleLabel.frame = NSRect(x: menuHeaderInset,
-                                  y: (bounds.height - titleH) / 2,
-                                  width: max(0, bounds.width - menuHeaderInset * 2 - menuCloseButtonSize - 8),
+        let h = bounds.height
+        let buttonH: CGFloat = 18
+        let buttonW: CGFloat = 44
+        let gapLogoTitle: CGFloat = 6
+
+        closeButton.frame = NSRect(x: bounds.width - menuHeaderTrailingInset - buttonW,
+                                   y: (h - buttonH) / 2,
+                                   width: buttonW, height: buttonH)
+
+        // logo 与标题整体靠左：logo 紧贴菜单左内边距（menuHeaderLeadingInset = 0）
+        let titleX = menuHeaderLeadingInset + menuLogoSize + gapLogoTitle
+        let titleH: CGFloat = 17
+        titleLabel.frame = NSRect(x: titleX,
+                                  y: (h - titleH) / 2,
+                                  width: max(0, closeButton.frame.minX - 8 - titleX),
                                   height: titleH)
-        closeButton.frame = NSRect(x: bounds.width - menuHeaderInset - menuCloseButtonSize,
-                                   y: (bounds.height - menuCloseButtonSize) / 2,
-                                   width: menuCloseButtonSize, height: menuCloseButtonSize)
+    }
+
+    /// logo 画在标题左侧（自己绘制，避免 NSImageView 对 SVG 的处理差异）。
+    override func draw(_ dirtyRect: NSRect) {
+        guard let logo = menuLogoImage else { return }
+        let logoRect = NSRect(x: menuHeaderLeadingInset,
+                              y: (bounds.height - menuLogoSize) / 2,
+                              width: menuLogoSize, height: menuLogoSize)
+        // 模板图由绘制上下文的 tint 着色，这里直接画即可
+        logo.draw(in: logoRect, from: .zero, operation: .sourceOver, fraction: 1.0)
     }
 
     @objc private func closeTapped() {
         // 菜单处于 tracking 模式，直接 terminate 可能被吞；先结束菜单跟踪再退出。
         enclosingMenuItem?.menu?.cancelTracking()
         onClose()
+    }
+}
+
+/// 「退出」胶囊按钮：自绘圆角边框与悬停底色。
+/// 不用 NSButton 的 bezel——无边框样式会把 layer 的底色/描边一并吃掉，且高亮行为不可控。
+final class ExitPillButton: NSButton {
+    private var hovered = false
+    private var pressed = false
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        isBordered = false
+        title = ""
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) 未实现") }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas { removeTrackingArea(area) }
+        addTrackingArea(NSTrackingArea(rect: bounds,
+                                       options: [.mouseEnteredAndExited, .activeAlways],
+                                       owner: self, userInfo: nil))
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovered = true; needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { hovered = false; pressed = false; needsDisplay = true }
+    override func mouseDown(with event: NSEvent) {
+        pressed = true; needsDisplay = true
+        super.mouseDown(with: event)          // 交给 NSButton 处理点击与 action
+        pressed = false; needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let radius = bounds.height / 2
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
+                                xRadius: radius, yRadius: radius)
+        if hovered {
+            NSColor.controlAccentColor.withAlphaComponent(pressed ? 0.75 : 1.0).setFill()
+            path.fill()
+        } else {
+            NSColor.clear.setFill()
+            path.fill()
+            NSColor.separatorColor.setStroke()
+            path.lineWidth = 1
+            path.stroke()
+        }
+
+        let text = "退出" as NSString
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: hovered ? NSColor.white : NSColor.secondaryLabelColor,
+        ]
+        let size = text.size(withAttributes: attrs)
+        text.draw(at: NSPoint(x: (bounds.width - size.width) / 2,
+                              y: (bounds.height - size.height) / 2),
+                  withAttributes: attrs)
     }
 }
 
@@ -373,6 +453,25 @@ private func truncateToWidth(_ s: String, targetWidth: CGFloat) -> String {
     }
     return result + "…"
 }
+
+/// 项目 logo：SVG 由 AppKit 直接加载，栅格化成模板图。
+/// 资源查找顺序：app bundle 内 → 可执行文件同级 Resources → 仓库 docs 目录（开发时直接跑二进制）。
+let menuLogoImage: NSImage? = {
+    let candidates: [URL?] = [
+        Bundle.main.url(forResource: "netspeed-logo", withExtension: "svg"),
+        Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/netspeed-logo.svg"),
+        URL(fileURLWithPath: CommandLine.arguments[0])
+            .deletingLastPathComponent()
+            .appendingPathComponent("netspeed-logo.svg"),
+    ]
+    for case let url? in candidates where FileManager.default.fileExists(atPath: url.path) {
+        if let svg = NSImage(contentsOf: url) {
+            return menuSymbolImage(svg, accessibilityDescription: "NetSpeed",
+                                   pointSize: 16, targetSize: menuLogoSize)
+        }
+    }
+    return nil
+}()
 
 // MARK: - 状态栏渲染：把两行文字画成 NSImage 交给状态栏按钮
 //
@@ -443,42 +542,127 @@ let menuInvisibleIcon: NSImage = {
     return img
 }()
 
-/// 菜单图标：SF Symbol 按 13pt semibold 栅格化成位图模板图。
-/// 注意必须栅格化——菜单项的 image 槽位不渲染 SF Symbol 的矢量表示（实测整枚图标不显示），
-/// 只有位图能显示。isTemplate = true 让图标跟随标题颜色（高亮时变白）。
-func menuSymbolImage(_ name: String, accessibilityDescription: String) -> NSImage? {
-    guard let base = NSImage(systemSymbolName: name, accessibilityDescription: accessibilityDescription) else {
-        return nil
-    }
-    let sym = base.withSymbolConfiguration(
-        NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)) ?? base
+/// 菜单图标：把任意矢量图（SF Symbol / SVG）栅格化成位图模板图，并裁到图形实际边界后铺满目标尺寸。
+///
+/// 两个必须这么做的原因：
+/// 1. 菜单项的 image 槽位不渲染 SF Symbol 的矢量表示（实测整枚图标不显示），只有位图能显示。
+/// 2. 符号自带大量内边距（bolt.fill 在 13pt 画布里图形只有约 4×6pt），
+///    直接按画布缩放会显得很小；因此先量出图形的实际像素边界，裁掉留白再放大。
+/// isTemplate = true 让图标跟随标题颜色（高亮时变白）。
+func menuSymbolImage(_ source: NSImage,
+                      accessibilityDescription: String,
+                      pointSize: CGFloat = 13,
+                      targetSize: CGFloat = menuIconTargetSize) -> NSImage? {
+    // SF Symbol 需要按 pointSize 配置；SVG 等普通图没有 symbol 配置，保持原样。
+    let sym = source.withSymbolConfiguration(
+        NSImage.SymbolConfiguration(pointSize: pointSize, weight: .semibold)) ?? source
 
-    let side: CGFloat = 16            // 系统菜单图标槽位
-    let scale: CGFloat = 2            // 2x 位图，Retina 下清晰
-    guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
-                                     pixelsWide: Int(side * scale), pixelsHigh: Int(side * scale),
+    // 1) 高分辨率渲染到 probe 画布，量出墨迹边界（裁掉符号自带的内边距）
+    let probeSide: CGFloat = 96
+    let probePx = Int(probeSide)
+    guard let probe = NSBitmapImageRep(bitmapDataPlanes: nil,
+                                       pixelsWide: probePx, pixelsHigh: probePx,
+                                       bitsPerSample: 8, samplesPerPixel: 4,
+                                       hasAlpha: true, isPlanar: false,
+                                       colorSpaceName: .deviceRGB,
+                                       bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
+    // 同 out：size 必须在创建 context 之前设好
+    probe.size = NSSize(width: probeSide, height: probeSide)
+    guard let probeCtx = NSGraphicsContext(bitmapImageRep: probe) else { return nil }
+
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = probeCtx
+    let s = sym.size
+    let fit = min(probeSide / max(s.width, 0.01), probeSide / max(s.height, 0.01))
+    let pw = s.width * fit, ph = s.height * fit
+    drawImage(sym, in: NSRect(x: (probeSide - pw) / 2, y: (probeSide - ph) / 2, width: pw, height: ph))
+    NSGraphicsContext.restoreGraphicsState()
+
+    let bbox = inkBounds(probe)
+    guard bbox.width > 0, bbox.height > 0 else { return nil }
+
+    // 2) 按墨迹边界裁剪（裁的是像素，因此用像素坐标），再等比放大到目标尺寸
+    let scale: CGFloat = 3
+    let px = Int(targetSize * scale)
+    let srcW = bbox.width, srcH = bbox.height
+    let scaleFit = min(CGFloat(px) / srcW, CGFloat(px) / srcH)
+    let dw = srcW * scaleFit / scale, dh = srcH * scaleFit / scale
+
+    guard let out = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: px, pixelsHigh: px,
                                      bitsPerSample: 8, samplesPerPixel: 4,
                                      hasAlpha: true, isPlanar: false,
                                      colorSpaceName: .deviceRGB,
-                                     bytesPerRow: 0, bitsPerPixel: 0),
-          let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
-    rep.size = NSSize(width: side, height: side)
+                                     bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
+    // 必须在创建 NSGraphicsContext 之前设 size：上下文按创建时刻的 rep.size 决定坐标系，
+    // 先建上下文再改 size 会让绘制按旧的像素尺寸（48pt）布局，图形只剩 1/3 大。
+    out.size = NSSize(width: targetSize, height: targetSize)
+    guard let outCtx = NSGraphicsContext(bitmapImageRep: out) else { return nil }
 
     NSGraphicsContext.saveGraphicsState()
-    NSGraphicsContext.current = ctx
-    ctx.imageInterpolation = .high
-    // 按比例缩放后居中（符号原始尺寸各不相同：13×18 / 19×12 / 18×14）
-    let s = sym.size
-    let fit = min(side / max(s.width, 0.01), side / max(s.height, 0.01))
-    sym.draw(in: NSRect(x: (side - s.width * fit) / 2, y: (side - s.height * fit) / 2,
-                        width: s.width * fit, height: s.height * fit),
-             from: .zero, operation: .sourceOver, fraction: 1.0)
+    NSGraphicsContext.current = outCtx
+    outCtx.cgContext.interpolationQuality = .high
+    // 直接从 probe 位图按墨迹矩形取像素绘制：一步完成「裁剪 + 缩放」，
+    // 不经过 CGImage.cropping，避免两个坐标系来回换算出错。
+    if let probeCG = probe.cgImage, let cropped = probeCG.cropping(to: bbox) {
+        outCtx.cgContext.draw(cropped,
+                              in: CGRect(x: (targetSize - dw) / 2, y: (targetSize - dh) / 2,
+                                         width: dw, height: dh))
+    }
     NSGraphicsContext.restoreGraphicsState()
 
-    let img = NSImage(size: NSSize(width: side, height: side))
-    img.addRepresentation(rep)
+    let img = NSImage(size: NSSize(width: targetSize, height: targetSize))
+    img.addRepresentation(out)
     img.isTemplate = true
     return img
+}
+
+/// SF Symbol 便捷入口。
+func menuSymbolImage(_ name: String,
+                     accessibilityDescription: String,
+                     pointSize: CGFloat = 13,
+                     targetSize: CGFloat = menuIconTargetSize) -> NSImage? {
+    guard let base = NSImage(systemSymbolName: name, accessibilityDescription: accessibilityDescription) else {
+        return nil
+    }
+    return menuSymbolImage(base, accessibilityDescription: accessibilityDescription,
+                           pointSize: pointSize, targetSize: targetSize)
+}
+
+/// 把图像画进当前上下文。SVG 走 cgImage（`draw(in:)` 在位图上下文里对 SVG 表现不稳定），
+/// 位图/符号走常规 `draw(in:)`。
+private func drawImage(_ image: NSImage, in rect: NSRect) {
+    if image.representations.first is NSBitmapImageRep {
+        image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0)
+        return
+    }
+    if let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+        NSGraphicsContext.current?.cgContext.draw(cg, in: rect)
+    } else {
+        image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0)
+    }
+}
+
+/// 位图里不透明像素的边界（用于裁掉图形周围留白）。
+/// 用 `colorAt` 读取而非直接读 dataProvider 缓冲区：后者在刚绘制完的位图上可能还是旧数据。
+private func inkBounds(_ rep: NSBitmapImageRep) -> CGRect {
+    let w = rep.pixelsWide, h = rep.pixelsHigh
+    var minX = w, minY = h, maxX = -1, maxY = -1
+    for y in 0..<h {
+        for x in 0..<w {
+            guard let c = rep.colorAt(x: x, y: y), c.alphaComponent > 0.1 else { continue }
+            if x < minX { minX = x }
+            if x > maxX { maxX = x }
+            if y < minY { minY = y }
+            if y > maxY { maxY = y }
+        }
+    }
+    guard maxX >= minX, maxY >= minY else { return .zero }
+    // 钳到画布内：cropping(to:) 的矩形越界会返回 nil（SVG 撑满整高时正好触到边界）
+    let x0 = max(0, min(minX, w - 1))
+    let y0 = max(0, min(minY, h - 1))
+    let x1 = max(x0, min(maxX, w - 1))
+    let y1 = max(y0, min(maxY, h - 1))
+    return CGRect(x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1)
 }
 
 // MARK: - 应用逻辑：状态栏 + 2 秒定时刷新 + Top10 进程流量菜单
@@ -687,6 +871,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // 顶部标题行：NetSpeed（大一号、加粗）+ 最右侧关闭按钮。
         // 视图项宽度决定菜单宽度，因此先按行内容算好整宽再构造，按钮才能贴到最右缘。
         menu.addItem(headerItem(width: menuContentWidth(nameW: nameW)))
+        menu.addItem(.separator())      // 标题行与进程列表之间的分隔线
 
         for p in topProcesses {
             menu.addItem(processItem(p.name,

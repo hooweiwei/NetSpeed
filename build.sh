@@ -56,6 +56,7 @@ assemble_app() {  # $1=二进制路径  $2=输出 .app 目录
     cp "$bin" "$out/Contents/MacOS/NetSpeed"
     cp Info.plist "$out/Contents/Info.plist"
     cp "$ICON" "$out/Contents/Resources/AppIcon.icns"
+    cp docs/netspeed-logo.svg "$out/Contents/Resources/netspeed-logo.svg"   # 菜单标题行 logo
     stamp_version "$out/Contents/Info.plist"   # 改 plist 必须早于 codesign，否则签名失效
     codesign --force -s - "$out"
 }
